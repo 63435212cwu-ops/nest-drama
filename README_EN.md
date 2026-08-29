@@ -2,6 +2,8 @@
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
+[中文](README.md) ｜ **English**
+
 A unit-story creation engine: build a world for a work, then let independent characters act within it to drive the plot — producing unit stories, unit plots, and volume plots for long- or medium-form novels, or short stories on their own. Runs fully offline with zero third-party dependencies.
 
 ## Features

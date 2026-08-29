@@ -2,6 +2,8 @@
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
+**中文** ｜ [English](README_EN.md)
+
 单元剧情创作引擎：先为作品建立一个世界，再让独立角色在世界内自主行动、推动剧情，产出单元故事、单元剧情与卷集剧情，用于辅助长篇、中篇创作，也可直接创作短篇。完全本地运行，零第三方依赖。
 
 ## 特性
