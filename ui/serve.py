@@ -2713,6 +2713,41 @@ def _auto_payload():
             "api_persisted": bool(_llm_cfg(ignore_mode=True))}
 
 
+def _run_wedged():
+    """运行态是否已「卡死可让位」：AUTO 标着在跑、但阶段静止超过单次 LLM 墙钟上限+余量。
+    心跳线程独立每 5 秒保活、并不代表 worker 线程还活着，故只以阶段静止时长为准。"""
+    if not AUTO["running"]:
+        return False
+    age = time.time() - (AUTO.get("stageAt") or 0)
+    return age > _LLM_WALL + 300
+
+
+def _auto_running():
+    """建世界/推演是否真的活着。卡死态视为不在跑，允许新任务接管——否则残留的运行态
+    （worker 线程卡死、进程曾中断）会把新的建世界指令永远挡在门外，表现为「点了没反应」。"""
+    return AUTO["running"] and not _run_wedged()
+
+
+def _auto_running_fatal():
+    """确认运行态已卡死（AUTO 在跑但阶段静止超限），供入口决策是否让位。"""
+    return _run_wedged()
+
+
+def _reclaim_stale_run():
+    """把卡死的运行态让位：清掉残留 running/stop/err，使下一次明示建世界能直接起新线程。"""
+    AUTO["running"] = False
+    AUTO["stop"] = False
+    AUTO["phase"] = ""
+    AUTO["err"] = ""
+
+
+def _next_gen():
+    """每次显式启动一个 worker 分配新代际号。旧线程在 finally 里只复位自己那一代——
+    防止一台卡死的旧线程结束后把新线程的运行态一起清掉。"""
+    AUTO["gen"] = AUTO.get("gen", 0) + 1
+    return AUTO["gen"]
+
+
 def _step_done(name, note=""):
     """主笔完成一个 → 进度按「已完成/总数」推进（15%→80% 之间线性）。
     旧版只在开场 15% 与裁判 85% 各报一次，中间几分钟的并行段进度条与阶段名全程冻结，
@@ -3398,6 +3433,15 @@ def _auto_init(raw, title_hint, requirement, log, confirm=False):
         return False, ("当前局已推演 %d 轮——建世界会归档并清空它。为防误毁，"
                        "非用户明示的建世界指令一律拒绝执行。" % rnd0)
 
+    _pend = _pending() or {}
+    _pfiles = [p for p in (_pend.get("files") or [])
+               if os.path.exists(os.path.join(ROOT_DIR, p))]
+    _raw_text = (raw or "").strip()
+    if not _pfiles and len(_raw_text) < 20:
+        return False, ("没有可用的建世界材料：请先在「投放新世界」中上传材料文件"
+                       "（.txt / 富文本 / PDF）后再点建造，否则建出来的是无数据空壳。"
+                       "这次建造已取消，当前世界未被动。")
+
     # 用户确认建造后先切换运行态，再做材料摄取。否则几十分钟的材料分析期间，
     # 页面仍显示旧世界，用户会误以为新世界没有开始或又加载了旧局。
     _set_progress("退出旧世界，准备空白库", 1)
@@ -3429,34 +3473,37 @@ def _auto_init(raw, title_hint, requirement, log, confirm=False):
     for d in ("角色", "剧本", "推演", "02-世界书", "导出", "沙盘"):
         os.makedirs(os.path.join(ROOT_DIR, d), exist_ok=True)
     _set_progress("提炼世界观与剧情脊椎", 40)
-    log("提炼世界与脊椎…")
-    t1, e1 = _llm([{"role": "system", "content": WORLD2_SYS}, {"role": "user", "content": base}],
-                  cfg, max_tokens=5000, temperature=0.35, retries=1,
-                  timeout=_BUILD_CALL_TIMEOUT, think=False)
-    W = _json_from(t1) or {}
-    if e1 or not W.get("world"):
-        return False, "世界层解析失败：" + (e1 or "输出不完整")
-    title = (W.get("title") or title_hint or "新局").strip()
-    sp = W.get("spine") or {}
-    # 世界层立即落盘——左侧活图谱长出「世界观+脊椎」节点
-    open(os.path.join(ROOT_DIR, "00-世界观.md"), "w", encoding="utf-8").write(
-        "---\ntype: world\ntitle: %s\n---\n\n# 世界观 · %s\n\n%s\n" % (title, title, W.get("world", "")))
-    L = ["---", "type: spine", "drift_budget: 2", "---", "", "# 剧情脊椎", "", "## 铁节点（必达）", ""]
-    L += ["%d. %s" % (i + 1, x) for i, x in enumerate(sp.get("iron", []))] or ["（材料未给，待补）"]
-    L += ["", "## 软节点（可漂移）", ""] + (["- " + x for x in sp.get("soft", [])] or ["（无）"])
-    L += ["", "## 禁区（绝不可发生）", ""] + (["- " + x for x in sp.get("forbid", [])] or ["（无）"])
-    if requirement:
-        L += ["", "## 作者补充[用户补充]", "", requirement]
-    open(os.path.join(ROOT_DIR, "01-剧情脊椎.md"), "w", encoding="utf-8").write("\n".join(L) + "\n")
-    if W.get("truth"):
-        open(os.path.join(ROOT_DIR, "真相底稿.md"), "w", encoding="utf-8").write(
-            "---\ntype: truth\naccess: 上帝专用——任何角色信封禁入\n---\n\n# 真相底稿\n\n%s\n" % W["truth"])
-    _set_progress("三卡 0/? · 角色点名中", 55)
-    log("角色点名…")
-    t2, _e = _llm([{"role": "system", "content": CAST_LIST_SYS}, {"role": "user", "content": base}],
-                  cfg, max_tokens=5000, temperature=0.2, retries=1,
-                  timeout=_BUILD_CALL_TIMEOUT, think=False)
-    C = _json_from(t2) or {}
+    log("提炼世界与脊椎＋角色点名（并行发起）…")
+    def _roster_call():
+        return _llm([{"role": "system", "content": CAST_LIST_SYS}, {"role": "user", "content": base}],
+                    cfg, max_tokens=5000, temperature=0.2, retries=1,
+                    timeout=_BUILD_CALL_TIMEOUT, think=False)
+    with ThreadPoolExecutor(max_workers=2) as _be:
+        _rF = _be.submit(_roster_call)
+        t1, e1 = _llm([{"role": "system", "content": WORLD2_SYS}, {"role": "user", "content": base}],
+                      cfg, max_tokens=5000, temperature=0.35, retries=1,
+                      timeout=_BUILD_CALL_TIMEOUT, think=False)
+        W = _json_from(t1) or {}
+        if e1 or not W.get("world"):
+            return False, "世界层解析失败：" + (e1 or "输出不完整")
+        title = (W.get("title") or title_hint or "新局").strip()
+        sp = W.get("spine") or {}
+        # 世界层立即落盘——左侧活图谱长出「世界观+脊椎」节点
+        open(os.path.join(ROOT_DIR, "00-世界观.md"), "w", encoding="utf-8").write(
+            "---\ntype: world\ntitle: %s\n---\n\n# 世界观 · %s\n\n%s\n" % (title, title, W.get("world", "")))
+        L = ["---", "type: spine", "drift_budget: 2", "---", "", "# 剧情脊椎", "", "## 铁节点（必达）", ""]
+        L += ["%d. %s" % (i + 1, x) for i, x in enumerate(sp.get("iron", []))] or ["（材料未给，待补）"]
+        L += ["", "## 软节点（可漂移）", ""] + (["- " + x for x in sp.get("soft", [])] or ["（无）"])
+        L += ["", "## 禁区（绝不可发生）", ""] + (["- " + x for x in sp.get("forbid", [])] or ["（无）"])
+        if requirement:
+            L += ["", "## 作者补充[用户补充]", "", requirement]
+        open(os.path.join(ROOT_DIR, "01-剧情脊椎.md"), "w", encoding="utf-8").write("\n".join(L) + "\n")
+        if W.get("truth"):
+            open(os.path.join(ROOT_DIR, "真相底稿.md"), "w", encoding="utf-8").write(
+                "---\ntype: truth\naccess: 上帝专用——任何角色信封禁入\n---\n\n# 真相底稿\n\n%s\n" % W["truth"])
+        _set_progress("三卡 0/? · 角色点名中", 55)
+        t2, _e = _rF.result()
+        C = _json_from(t2) or {}
     roster = [x for x in (C.get("cast") or [])
               if isinstance(x, dict) and (x.get("name") or "").strip()]
     if not roster:
@@ -3685,8 +3732,11 @@ def _auto_init_thread(raw, title, req, then_run=True, confirm=False):
     """前端直启的建世界线程（队列里对应的 init 指令由 mtime 守卫自动视为已消费）。"""
     def log(m):
         AUTO["log"] = (AUTO["log"] + [m])[-50:]
+    my_gen = _next_gen()
     AUTO["running"] = True
+    AUTO["stop"] = False
     AUTO["phase"] = "build"
+    AUTO["err"] = ""
     AUTO["stageLimit"] = _BUILD_CALL_TIMEOUT * 2 + 60
     try:
         ok, msg = _init_and_run(raw, title, req, then_run, log, confirm=confirm)
@@ -3701,8 +3751,9 @@ def _auto_init_thread(raw, title, req, then_run=True, confirm=False):
         AUTO["err"] = "建世界异常中断：%r" % e
         log(AUTO["err"])
     finally:
-        AUTO["running"] = False
-        AUTO["phase"] = ""
+        if AUTO.get("gen") == my_gen:
+            AUTO["running"] = False
+            AUTO["phase"] = ""
 
 
 def _gravity_inject(text):
@@ -4304,7 +4355,9 @@ class Handler(SimpleHTTPRequestHandler):
                     saved.append("材料/" + fn)
                 except Exception:
                     continue
-            auto = bool(_llm_cfg()) and not AUTO["running"]
+            if _auto_running_fatal():
+                _reclaim_stale_run()
+            auto = bool(_llm_cfg()) and not _auto_running()
             _build_fail_clear()                             # 新一轮投放即新一轮尝试：清掉旧失败痕
             json.dump({"title": title, "requirement": req, "files": saved,
                        "at": time.strftime("%Y-%m-%d %H:%M:%S"), "at_ts": time.time()},
@@ -4315,6 +4368,9 @@ class Handler(SimpleHTTPRequestHandler):
                 threading.Thread(target=_auto_init_thread, args=(raw, title, req, False, True),
                                  daemon=True).start()
             else:
+                if AUTO["running"]:
+                    return self._json(409, {"success": False,
+                                            "error": "建世界进行中：请等待当前建库完成或暂停后再投。"})
                 _enqueue("init", {"title": title, "requirement": req, "files": saved,
                                    "raw_preview": raw[:600], "confirm": True,
                                    "then_run": False})
@@ -4511,6 +4567,18 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def end_headers(self):
+        """静态资产禁缓存：bundle/css/data 改了强刷即见。send_response 会重置头缓冲，
+        故不能在下发前预置头，只能在 end_headers 收口时补。"""
+        rel = self.path.lstrip("/").split("?")[0]
+        if rel.startswith("assets/") or rel in ("data.json", "seal.svg", "ui-adjustments.js",
+                                                "favicon.ico", "THIRD-PARTY-LICENSES.txt"):
+            try:
+                self.send_header("Cache-Control", "no-store")
+            except Exception:
+                pass
+        super().end_headers()
+
     def do_GET(self):
         from urllib.parse import urlparse, parse_qs
         u = urlparse(self.path)
@@ -4554,6 +4622,11 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.send_header("Connection", "keep-alive")
             self.end_headers()
+            conn = self.connection
+            try:
+                conn.settimeout(10.0)
+            except Exception:
+                pass
             last = _mtimes()
             last_ver = AUTO.get("ver", 0)
             last_push = 0.0
@@ -4577,14 +4650,26 @@ class Handler(SimpleHTTPRequestHandler):
                         # 进度即推：阶段/主笔/实时产出一变就到前端，不再等 2s 轮询
                         last_ver = ver
                         last_push = time.time()
-                        self.wfile.write(("event: progress\ndata: %s\n\n"
-                                          % json.dumps(_auto_payload(), ensure_ascii=False)).encode())
+                        try:
+                            payload = json.dumps(_auto_payload(), ensure_ascii=False).encode("utf-8")
+                        except Exception:
+                            payload = b"{}"
+                        self.wfile.write(b"event: progress\ndata: " + payload + b"\n\n")
                         sent = True
                     if not sent:
                         self.wfile.write(b": keepalive\n\n")
                     self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
+            except Exception:
                 return
+            finally:
+                try:
+                    self.wfile.close()
+                except Exception:
+                    pass
+                try:
+                    conn.close()
+                except Exception:
+                    pass
         # SPA fallback：非文件路径回 index.html（vue-router history 模式）
         fp = os.path.join(UI_DIR, self.path.lstrip("/").split("?")[0])
         if self.path != "/" and not os.path.exists(fp) and "." not in os.path.basename(u.path):
@@ -4597,7 +4682,8 @@ class Handler(SimpleHTTPRequestHandler):
         # 旧版对 .json 无拦截——api-config.json 明文密钥可被同机任意进程/网页匿名 GET。
         rel = self.path.lstrip("/").split("?")[0]
         if not (rel.startswith("assets/") or rel in ("seal.svg", "ui-adjustments.js",
-                                                     "favicon.ico", "THIRD-PARTY-LICENSES.txt")):
+                                                     "data.json", "favicon.ico",
+                                                     "THIRD-PARTY-LICENSES.txt")):
             return self._json(403, {"error": "禁止访问：%s（运行态文件不外发）" % rel})
         return super().do_GET()
 

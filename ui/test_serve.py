@@ -146,12 +146,22 @@ def check(name, cond, extra=""):
         fails.append(name)
 
 
+def _deposit(files=("材料/00_测试.txt",)):
+    """模拟「投放新世界」：把本批材料白名单写进 pending-init.json。
+    空材料守卫(serve._auto_init)只认这一批白名单——真实建造的唯一材料入口。
+    直接往 材料/ 放文件不写白名单，应被判为「没有可用的建世界材料」。"""
+    json.dump({"title": "测试局", "requirement": "", "files": list(files),
+               "at": time.strftime("%Y-%m-%d %H:%M:%S"), "at_ts": time.time()},
+              open(m.PENDING_PATH, "w", encoding="utf-8"), ensure_ascii=False)
+
+
 print("== ① 队列消费器：init 全链路（建世界→世界书→自动推演2轮→收束） ==")
 m._save_queue({"queue": [{"id": "c-0001", "ts": "2026-08-26 14:15:18", "status": "待处理", "type": "init",
                            "payload": {"title": "测试局", "requirement": "支撑28章", "raw": "测试材料", "confirm": True}}]})
 t = threading_t = None
 import threading
 th = threading.Thread(target=lambda: None)  # 占位
+_deposit()
 ok, msg = m._dispatch({"id": "c-0001", "type": "init",
                        "payload": {"title": "测试局", "requirement": "支撑28章", "raw": "测试材料", "confirm": True}}, log)
 print("  init 回执:", msg)
@@ -316,6 +326,7 @@ m._api_save({"profiles": [{"id": "p9", "name": "持久档", "base_url": "https:/
 m._llm_cfg = lambda ignore_mode=False: {"base_url": "http://x", "model": "m", "api_key": "k"}
 CURRENT_TITLE[0] = "第二局"                             # fake 建世界改返回新局名
 m._archive_old_world = REAL_ARCHIVE                   # 恢复真实归档（M22 起写沙盒库内 归档/，天然隔离）
+_deposit()
 m._auto_init("第二局材料", "第二局", "需求", log, confirm=True)   # 用户亲手投放=确认覆盖
 hist = m._archives_store()
 check("归档后局史+1", len(hist["archives"]) == 1 and hist["archives"][0]["title"] == "测试局", hist)
@@ -717,6 +728,7 @@ m.DATA_PATH = os.path.join(m.UI_DIR, "data.json")
 m.PENDING_PATH = os.path.join(m.UI_DIR, "pending-init.json")
 m._llm_cfg = lambda ignore_mode=False: {"base_url": "http://x", "model": "m", "api_key": "k"}
 _real_wcf = m._write_cast_files
+_deposit()
 
 
 def _boom(c):
