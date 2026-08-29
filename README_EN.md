@@ -4,13 +4,15 @@
 
 [中文](README.md) ｜ **English**
 
-Turn novel characters into living people: every character is an independent simulated mind — knowing only what they should know, fearing what they should fear, speaking in their own voice. The plot is a gravity field, not a rail: characters act freely, and the world pulls the story toward its milestones using only in-world means.
+NEST-DRAMA is a unit-story creation engine. It works from unit stories and unit plots as its basic units, with volume plots as the structural spine — built to support long- and medium-form novel writing, and equally suited to writing short stories directly: build a world for a work first, then let the characters act within it to move the plot.
 
-## First: what it is — and what it isn't
+## Purpose & Usage
 
-It is **not** a "one-click, write-me-a-whole-novel" tool.
+NEST-DRAMA's output path is not "one-click generation of a full-length novel." Its basic output unit is the plot unit: you create unit stories and unit plots first, then weave them into volume plots that form a larger narrative structure, supporting the progress of long- and medium-form novels.
 
-It is a **story-unit simulation engine**: your story is split into units, and the engine plays them out one unit at a time, each until it lands. Two ways to use it —
+It is also well suited to writing short stories directly. To create, first build a self-contained world for a work, then let the characters act within it on their own, advancing the plot and making the causality pay off.
+
+Two organizational modes —
 
 - **Single story**: one story, one or a few units, played to a close
 - **Serialized / volume stories**: units chain together like episodes; character states, old scores, and relationships carry across units
@@ -23,11 +25,20 @@ It is a **story-unit simulation engine**: your story is split into units, and th
 
 **Step 3 · You direct.** Step in whenever you like (see next section). When a unit closes, the baton passes to the next one — or stop to interview characters and export the transcript.
 
-## Why the characters feel alive
+## Where the characters' believability comes from
 
 - **Everyone knows only what they should**: characters can't see each other's minds or schemes; information gaps are real
 - **Characters carry private baggage**: a few things unrelated to the plot hang in each life — a stomachache all morning, an unanswered text, someone they can't stop thinking about. At key moments, these compete with the plot for their attention
 - **No railroading**: milestones are reached through in-world means — a piece of news delivered to the right ears, pressure put on the table. No fabrication, no rewriting of hearts
+
+## The galaxy atlas: see your world at a glance
+
+Every time the engine saves progress, it also draws the world into a living graph — the galaxy atlas on the left is not a static diagram but a star map that grows with the story:
+
+- **Nodes are the world's entities**: the worldview + plot spine, each unit, and each worldbook entry grow into a node; a character's appearance sparks an "appearing" edge
+- **Colored by unit, progress at a glance**: nodes and edges are tinted per unit, so you can see at a glance which volume you're in and who appears where
+- **Two views**: Star Cluster (3D) lays the graph out as a rotatable constellation; Relationship Matrix flattens character connections into a matrix, purpose-built for studying who's linked to whom
+- **Always current**: connections appear and update live as you build the world, switch units, or continue a story, and they re-fetch on reconnect — you're always looking at the latest state
 
 ## Where you can step in
 
