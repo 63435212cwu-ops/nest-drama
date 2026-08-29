@@ -17,61 +17,61 @@ Two organizational modes —
 - **Single story**: one story, one or a few units, played to a close
 - **Serialized / volume stories**: units chain together like episodes; character states, old scores, and relationships carry across units
 
-## How it plays out
+## How it works
 
-**Step 1 · Build the world.** Drop your setting materials (plain text) in. After reading everything, the engine sets the worldview, buries a "truth manuscript" only it knows, and files three cards for every character — who they are (core), how they talk (voice), and what's on their mind right now (psyche). Then it cuts the story into units, each with its own goal and round budget.
+**Step 1 · Build the world.** Provide your setting materials (plain text). After reading them all, the engine establishes the worldview, lays down a "truth manuscript" known only to itself, and files three cards per character — core identity (who they are), voice (how they speak), and current psyche (what's on their mind). It then splits the story into units, each with its own goal and round budget.
 
-**Step 2 · Play, unit by unit.** Every round runs like a film set: a script supervisor stages the scene and picks who's on; whoever's turn it is speaks and acts on their own agenda, the others react. A supervising editor reviews each draft — anything that doesn't read like human prose gets killed and rewritten. A referee keeps books every round: goal progress, who's starved for screen time, who's circling in place.
+**Step 2 · Play unit by unit.** Each round runs like a staged scene: a script supervisor sets up the scene and decides who appears; the character whose turn it is acts and speaks on their own agenda, while the others react. A supervising editor reviews each draft and sends back anything that reads stilted, repetitive, or that over-reaches into psychological description. A referee keeps the books each round — goal progress, screen-time balance, and any aimless looping.
 
-**Step 3 · You direct.** Step in whenever you like (see next section). When a unit closes, the baton passes to the next one — or stop to interview characters and export the transcript.
+**Step 3 · You direct.** You can step in at any point during the run (see "Intervention options" below). When a unit closes, the next one begins automatically — or you can pause to interview a character or export the full transcript.
 
-## Where the characters' believability comes from
+## Where character believability comes from
 
-- **Everyone knows only what they should**: characters can't see each other's minds or schemes; information gaps are real
-- **Characters carry private baggage**: a few things unrelated to the plot hang in each life — a stomachache all morning, an unanswered text, someone they can't stop thinking about. At key moments, these compete with the plot for their attention
-- **No railroading**: milestones are reached through in-world means — a piece of news delivered to the right ears, pressure put on the table. No fabrication, no rewriting of hearts
+- **Characters know only what they should**: they cannot see one another's minds or schemes; information gaps are real — only what a character knows can influence what they do
+- **Characters carry life outside the plot**: each one has small, unrelated concerns hanging in their life — a half-day of stomachache, an unanswered message, someone they can't stop thinking about — which compete with the main plot at key moments
+- **The plot advances through in-world means**: milestones are reached by delivering news to the right ears, putting pressure on the table, and so on — no fabrication, no rewriting of hearts
 
-## The galaxy atlas: see your world at a glance
+## The galaxy atlas
 
-Every time the engine saves progress, it also draws the world into a living graph — the galaxy atlas on the left is not a static diagram but a star map that grows with the story:
+Each time the engine saves, it also renders the world as a living graph — the galaxy atlas in the left panel is not a static diagram but a star map that grows with the story:
 
-- **Nodes are the world's entities**: the worldview + plot spine, each unit, and each worldbook entry grow into a node; a character's appearance sparks an "appearing" edge
-- **Colored by unit, progress at a glance**: nodes and edges are tinted per unit, so you can see at a glance which volume you're in and who appears where
-- **Two views**: Star Cluster (3D) lays the graph out as a rotatable constellation; Relationship Matrix flattens character connections into a matrix, purpose-built for studying who's linked to whom
-- **Always current**: connections appear and update live as you build the world, switch units, or continue a story, and they re-fetch on reconnect — you're always looking at the latest state
+- **Nodes map to world entities**: the worldview + plot spine, each unit, and each worldbook entry become a node; a character appearing in a unit spawns an "appearing" edge
+- **Colored by unit, progress at a glance**: nodes and edges are tinted per unit, showing at a glance which volume the run has reached and who appears in each unit
+- **Two views**: Star Cluster (3D) presents the graph as a rotatable constellation; Relationship Matrix lays character connections out as a matrix, for studying who relates to whom
+- **Always current**: connections appear and update live as you build the world, switch units, or continue a story; they re-fetch on reconnect, so what you see is always the latest state
 
-## Where you can step in
+## Intervention options
 
-| You can | What it does |
+| Option | What it does |
 |---|---|
-| Gravity mode (loose / medium / tight) | How hard the world pulls the story toward the goal |
-| God inject | Slip one plot instruction into a round; burns after use |
-| Pause | Stop the auto-run anytime |
+| Gravity mode (loose / medium / tight) | How strongly the world pulls the story toward its goal |
+| God inject | Inject one plot instruction into a round; discarded after use |
+| Pause | Stop the auto-run at any time |
 | Interview | Question a character in-story, or press for the truth |
-| Continue / export | Pick up after a unit closes, or export the full transcript |
+| Continue / export | Resume after a unit closes, or export the full transcript |
 
 ## Getting started
 
-1. Have Python 3 installed (nothing else — zero dependencies)
-2. Run `python3 ui/serve.py`, open `http://localhost:8787`
-3. Fill in your own LLM API key in the console → drop in your materials → hit "Build world"
+1. Install Python 3 (no other dependencies)
+2. Run `python3 ui/serve.py` and open `http://localhost:8787`
+3. Enter your LLM API key in the console → import your materials → click "Build world"
 
-**Preparing materials**: throw in what you already have — worldview, character bios, outlines, backstory, as plain text. One world, one set of materials; mixing several books into one build muddies the flavor.
+**Preparing materials**: provide what you already have — worldview, character bios, outline, prior story — as plain text. Use one self-contained set of materials per world; mixing works from different books into a single world muddies the result.
 
-**If it gets interrupted**: no need to start over. Resubmit and it picks up where it left off; unchanged materials are not re-billed.
+**Resuming after an interruption**: no need to start over. Resubmit and it continues from where it left off; materials that have not changed are not re-billed.
 
-## Where your stuff lives
+## Data & privacy
 
-- Everything you feed in and everything it writes stays in **this folder on your own machine** — no server involved
-- Your API key lives in your home directory (`~/.nest-drama/`), never inside the project or its git history
-- Engine code and your creative data are strictly separated: handing this project to someone else **cannot carry your manuscripts**
+- Materials you feed in and the content it generates are all stored in the local directory; nothing passes through any server
+- Your API key lives in your home directory (`~/.nest-drama/`), never inside the project folder or in version control
+- Engine code and your creative data are strictly separated: even handing this project to someone else cannot carry away your manuscripts
 
-## For the technically curious (skippable)
+## Technical notes
 
-- Engine: `ui/serve.py`, pure Python standard library, zero third-party deps; language layer `ui/dupian.py`: zero-token mechanical AI-tics detection
-- Integration tests: `python3 ui/test_serve.py` — full pipeline plus failure paths, mocked LLM, costs nothing
-- Release packaging: `python3 pack-release.py` — hard separation of engine and user data, with an automatic privacy scan
+- Engine core `ui/serve.py`: pure Python standard library, zero third-party dependencies; language layer `ui/dupian.py`: zero-token detection of mechanical "AI tics"
+- Integration tests `python3 ui/test_serve.py`: cover the full pipeline and failure paths, with a mocked LLM and no real-call cost
+- Release packaging `python3 pack-release.py`: hard separation of engine and user data, with an automated privacy scan after packaging
 
 ## License
 
-AGPL-3.0 (full text in [LICENSE](LICENSE)). In plain words: use it free, modify it, even make money with it — but modified versions, and online services built on it, must stay equally open to their users. Third-party licenses for the frontend are listed in `ui/THIRD-PARTY-LICENSES.txt`.
+Licensed under [AGPL-3.0](LICENSE). In summary: you are free to use, modify, and commercialize it — but modified versions, and online services built on it, must be made available to users under the same license. Third-party licenses for the frontend are listed in `ui/THIRD-PARTY-LICENSES.txt`.
