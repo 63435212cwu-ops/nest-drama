@@ -35,7 +35,7 @@ ENGINE_FILES = [                                   # 发布白名单：引擎本
     "ui/assets/index-Dbzr5ZOw.js",
     "ui/assets/index-DPnICO7N.css",
     "README.md",
-    "README_EN.md",                                # 英文版门面：海外用户入口
+    "README_CN.md",                                # 中文版门面：中文用户入口（默认英文在 README.md）
     "LICENSE",                                     # AGPL-3.0：分发必须随附协议全文
     ".gitignore",                                  # 解包即是可 git init 的完整仓库
 ]

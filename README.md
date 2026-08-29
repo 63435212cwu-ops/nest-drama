@@ -2,65 +2,65 @@
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-**中文** ｜ [English](README_EN.md)
+**English** ｜ [中文](README_CN.md)
 
-单元剧情创作引擎：先为作品建立一个世界，再让独立角色在世界内自主行动、推动剧情，产出单元故事、单元剧情与卷集剧情，用于辅助长篇、中篇创作，也可直接创作短篇。完全本地运行，零第三方依赖。
+A unit-story creation engine: build a world for a work, then let independent characters act within it to drive the plot — producing unit stories, unit plots, and volume plots for long- or medium-form novels, or short stories on their own. Runs fully offline with zero third-party dependencies.
 
-## 特性
+## Features
 
-- **单元化创作**——以单元故事 / 单元剧情 / 卷集剧情组织叙事；辅助长中篇小说，也可直接写短篇
-- **角色独立**——每个角色只掌握其应知的信息，按自身性格说话行事
-- **世界驱动**——剧情节点通过世界内的因果自然达成，不强行另行安排
-- **实时星系图谱**——世界以节点图形式随剧情生长；提供星丛（3D）与关系矩阵两种视图
-- **作者可控**——引力档、上帝注入、暂停、访谈角色、续演 / 导出等干预手段
-- **本地优先**——纯 Python 标准库、零第三方依赖，数据与 API 密钥仅存于本机
+- **Unit-based writing** — story is organized into unit stories, unit plots, and volume plots; assists long/medium novels, also writes short stories directly
+- **Independent characters** — each character only knows what they should know, and acts and speaks in their own voice
+- **World-driven plot** — milestones are reached through in-world causality, not authorial forcing
+- **Live galaxy atlas** — the world becomes a growing node graph; Star Cluster (3D) and Relationship Matrix views
+- **Author control** — gravity mode, god-inject, pause, interview, continue/export
+- **Local-first** — pure Python standard library, zero third-party dependencies; data and API key stay on your machine
 
-## 安装
+## Install
 
-运行环境：Python 3（无需其他依赖）。
+Requires **Python 3** (no other dependencies).
 
 ```bash
-# 拉取仓库或解压发布包后，直接运行：
+# Clone the repo or unpack the release package, then simply run:
 python3 ui/serve.py
 ```
 
-## 使用
+## Usage
 
-1. 启动引擎：`python3 ui/serve.py`
-2. 浏览器打开 `http://localhost:8787`
-3. 在控制台填入你的大模型 API 密钥 → 导入创作材料 → 点击「建世界」
+1. Start the engine: `python3 ui/serve.py`
+2. Open `http://localhost:8787` in your browser
+3. In the console: enter your LLM API key → import your materials → click **Build world**
 
-**材料准备**：直接提供已有素材即可——世界观、人物设定、大纲、前置情节，纯文本即可。每个世界使用独立的一套材料，勿将多部作品混入同一世界。
+**Materials.** Plain text is enough — worldview, character bios, outline, prior story. Use one self-contained set of materials per world; don't mix multiple works into a single world.
 
-**中断恢复**：重新提交指令即可从断点继续，未被修改的材料不会重复计费。
+**Interruptions.** Resubmit to resume from where it left off; unchanged materials are not re-billed.
 
-## 数据与隐私
+## Data & privacy
 
-- 投入的材料与生成的推演内容全部保存在本地目录内，不经过任何服务器
-- API 密钥存储于用户主目录 `~/.nest-drama/`，不进项目目录、不纳入版本控制
-- 引擎代码与创作数据完全分离；将本项目转发给他人不会带走你的稿件
+- Materials you feed in and the content it generates are all stored in the local directory; nothing passes through any server
+- Your API key lives in your home directory `~/.nest-drama/`, outside the project folder and version control
+- Engine code and your creative data are strictly separated; handing the project to someone else cannot carry away your manuscripts
 
-## 目录结构
+## Directory structure
 
 ```
-ui/serve.py              引擎核心：推演 + HTTP 服务（REST + SSE）
-ui/dupian.py             语言层：零 token 的机械「AI 腔」检测
-ui/test_serve.py         集成测试（模拟 LLM）
-ui/index.html            前端页面
-ui/assets/               前端构建产物
-ui/THIRD-PARTY-LICENSES.txt  前端第三方许可
-pack-release.py          发布打包（含自动化隐私审查）
-材料/                    创作材料目录（随包分发空骨架）
+ui/serve.py                     Engine core: simulation + HTTP server (REST + SSE)
+ui/dupian.py                    Language layer: zero-token detection of mechanical "AI tics"
+ui/test_serve.py                Integration tests (mocked LLM)
+ui/index.html                   Frontend
+ui/assets/                      Frontend build artifacts
+ui/THIRD-PARTY-LICENSES.txt     Third-party licenses for the frontend
+pack-release.py                 Release packaging, with automated privacy scan
+材料/                           Materials folder (empty skeleton ships with the package)
 ```
 
-## 测试
+## Tests
 
 ```bash
 python3 ui/test_serve.py
 ```
 
-覆盖全链路与失败路径，使用模拟 LLM，无实际调用成本。
+Covers the full pipeline and failure paths, using a mocked LLM with no real-call cost.
 
-## 许可证
+## License
 
-[AGPL-3.0](LICENSE)。可自由使用、修改与商用；修改后的版本及基于本项目提供的在线服务，须以同等许可向用户开源。前端第三方许可见 `ui/THIRD-PARTY-LICENSES.txt`。
+[AGPL-3.0](LICENSE). Free to use, modify, and commercialize — but modified versions, and online services built on it, must be open to users under the same license. Third-party frontend licenses are listed in `ui/THIRD-PARTY-LICENSES.txt`.
