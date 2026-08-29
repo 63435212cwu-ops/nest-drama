@@ -15,6 +15,8 @@ A unit-story creation engine: build a world for a work, then let independent cha
 - **Author control** — gravity mode, god-inject, pause, interview, continue/export
 - **Local-first** — pure Python standard library, zero third-party dependencies; data and API key stay on your machine
 
+> **Note:** For the best galaxy-atlas rendering, avoid creating an excessive number of characters — an overly large cast causes the graph to appear sparse and out of proportion.
+
 ## Install
 
 Requires **Python 3** (no other dependencies).
