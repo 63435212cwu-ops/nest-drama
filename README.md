@@ -6,16 +6,16 @@
 
 A unit-story creation engine: build a world for a work, then let independent characters act within it to drive the plot — producing unit stories, unit plots, and volume plots for long- or medium-form novels, or short stories on their own. Runs fully offline with zero third-party dependencies.
 
+![Star Cluster (3D)](docs/star-cluster.png)
+
 ## Features
 
 - **Unit-based writing** — story is organized into unit stories, unit plots, and volume plots; assists long/medium novels, also writes short stories directly
 - **Independent characters** — each character only knows what they should know, and acts and speaks in their own voice
 - **World-driven plot** — milestones are reached through in-world causality, not authorial forcing
-- **Live galaxy atlas** — the world becomes a growing node graph; Star Cluster (3D) and Relationship Matrix views
+- **Live galaxy atlas** — the world becomes a growing solar-system-style 3D graph; click a character on the wall to lock onto their planet, double-click a planet to dive into that character's own galaxy
 - **Author control** — gravity mode, god-inject, pause, interview, continue/export
 - **Local-first** — pure Python standard library, zero third-party dependencies; data and API key stay on your machine
-
-> **Note:** For the best galaxy-atlas rendering, avoid creating an excessive number of characters — an overly large cast causes the graph to appear sparse and out of proportion.
 
 ## Install
 
@@ -52,6 +52,7 @@ ui/index.html                   Frontend
 ui/assets/                      Frontend build artifacts
 ui/THIRD-PARTY-LICENSES.txt     Third-party licenses for the frontend
 pack-release.py                 Release packaging, with automated privacy scan
+docs/                           Screenshots and project docs
 材料/                           Materials folder (empty skeleton ships with the package)
 ```
 
