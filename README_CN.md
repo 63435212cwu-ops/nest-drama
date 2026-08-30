@@ -6,7 +6,10 @@
 
 单元剧情创作引擎：先为作品建立一个世界，再让独立角色在世界内自主行动、推动剧情，产出单元故事、单元剧情与卷集剧情，用于辅助长篇、中篇创作，也可直接创作短篇。完全本地运行，零第三方依赖。
 
-![星丛（3D）](docs/star-cluster.png)
+<p>
+  <img src="docs/star-cluster.png" alt="星丛（3D）" width="49%">
+  <img src="docs/character-galaxy.png" alt="角色星系" width="49%">
+</p>
 
 ## 特性
 

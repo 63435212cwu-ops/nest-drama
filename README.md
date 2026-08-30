@@ -6,7 +6,10 @@
 
 A unit-story creation engine: build a world for a work, then let independent characters act within it to drive the plot — producing unit stories, unit plots, and volume plots for long- or medium-form novels, or short stories on their own. Runs fully offline with zero third-party dependencies.
 
-![Star Cluster (3D)](docs/star-cluster.png)
+<p>
+  <img src="docs/star-cluster.png" alt="Star Cluster (3D)" width="49%">
+  <img src="docs/character-galaxy.png" alt="Character Galaxy" width="49%">
+</p>
 
 ## Features
 
