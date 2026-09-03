@@ -44,6 +44,9 @@ ENGINE_FILES = [                                   # 发布白名单：引擎本
     "ui/assets/index-DPnICO7N.css",
     "README.md",
     "CHANGELOG.md",                                # 版本变更记录
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "CODE_OF_CONDUCT.md",
     "README_CN.md",                                # 中文版门面：中文用户入口（默认英文在 README.md）
     "docs/star-cluster.png",                       # README 介绍图：主星丛
     "docs/character-galaxy.png",                   # README 介绍图：角色星系
