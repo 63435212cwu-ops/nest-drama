@@ -554,6 +554,74 @@ _c16 = [
 for t, name, fn in _c16:
     check(name, fn(t))
 check("悖论修辞删后缀信息不减", _dp2.repair("他平静得可怕。")[0] == "他平静。", _dp2.repair("他平静得可怕。")[0])
+# ── 数目账 / 密度裁决 / v4 病谱（零 token）──
+check("中文数字·五千二百", _dp2.cn2int("五千二百") == 5200)
+check("中文数字·两万三", _dp2.cn2int("两万三") == 23000)
+check("中文数字·三百零六", _dp2.cn2int("三百零六") == 306)
+_nf = _dp2.num_facts("船夫转运五千二百领重铠，仓中存粮一千二百石，甲士八百人。", "阿青")
+check("数目抽取·单位后名词", any(f["noun"] == "重铠" and f["qty"] == 5200 and f["unit"] == "领" for f in _nf), _nf)
+check("数目抽取·单位前名词", any(f["noun"].endswith("存粮") and f["qty"] == 1200 for f in _nf), _nf)
+_led = [{"qty": 5200, "unit": "领", "noun": "重铠", "round": 3, "who": "船夫"}]
+_c1 = _dp2.num_conflicts(_dp2.num_facts("那五千领重铠昨日已到。", "老周"), _led)
+check("数目冲突·悄悄换数被抓", len(_c1) == 1 and _c1[0][0]["qty"] == 5000, _c1)
+check("数目冲突·明着质疑放行", _dp2.disputes("你说五千领？不对，账上是五千二百领。", "重铠"))
+check("数目冲突·同数不报", not _dp2.num_conflicts(_dp2.num_facts("五千二百领重铠。", "x"), _led))
+check("密度裁决·短文少量命中不毙", not _dp2.density_verdict("他顿了顿。「走。」")[0])
+check("密度裁决·密集命中毙", _dp2.density_verdict("他顿了顿，深吸一口气，垂眸，指节泛白，瞳孔一缩，嘴角勾起。喉结滚动，欲言又止，一字一顿地说。")[0])
+check("v4病谱·欲言又止", any(h[0] == "欲言又止" for h in _dp2.scan("他欲言又止。")))
+check("v4病谱·拟人沉默", any(h[0] == "拟人沉默" for h in _dp2.scan("沉默在屋里蔓延。")))
+check("统计层·破折号成瘾", any("破折号" in d for d in _dp2.diagnose("他——走了——又回——来——再走——又回——不走了——罢了。")))
+
+# ── 材料读取层：编码嗅探 / 办公格式 / zip 展开 / API 结构 ──
+import io as _io, zipfile as _zf, zlib as _zl
+_S = sys.modules.get("serve") or __import__("serve")
+def _mk_docx(paras):
+    b = _io.BytesIO(); z = _zf.ZipFile(b, "w")
+    z.writestr("word/document.xml", '<w:document><w:body>%s<w:p><w:r><w:t>A</w:t><w:tab/><w:t>B</w:t><w:br/><w:t>C &amp; D</w:t></w:r></w:p></w:body></w:document>'
+               % "".join("<w:p><w:r><w:t>%s</w:t></w:r></w:p>" % x for x in paras)); z.close(); return b.getvalue()
+def _mk_zip(entries):
+    b = _io.BytesIO(); z = _zf.ZipFile(b, "w")
+    for n, d in entries: z.writestr(n, d)
+    z.close(); return b.getvalue()
+check("读取·UTF-16 带BOM", _S._decode_bytes("a.txt", "阿青来了".encode("utf-16")) == "阿青来了")
+check("读取·UTF-16LE 无BOM 纯中文", _S._decode_bytes("a.txt", "阿青来了，州牧府议事。".encode("utf-16-le")) == "阿青来了，州牧府议事。")
+check("读取·GB18030", _S._decode_bytes("a.txt", "阿青·州府的穷账".encode("gb18030")) == "阿青·州府的穷账")
+check("读取·Big5", _S._decode_bytes("a.txt", "阿青來了，議事廳。".encode("big5")) == "阿青來了，議事廳。")
+check("读取·BOM 与 CRLF 规整", _S._decode_bytes("a.md", "\ufeffX\r\nY".encode("utf-8")) == "X\nY")
+_dx = _S._decode_bytes("a.docx", _mk_docx(["段一", "段二"]))
+check("读取·docx 段落/制表/换行/实体", "段一" in _dx and "A\tB\nC & D" in _dx, _dx)
+_ep = _mk_zip([("META-INF/container.xml", '<container><rootfiles><rootfile full-path="OEBPS/c.opf"/></rootfiles></container>'),
+               ("OEBPS/c.opf", '<package><manifest><item id="c2" href="c2.xhtml"/><item id="c1" href="c1.xhtml"/></manifest><spine><itemref idref="c1"/><itemref idref="c2"/></spine></package>'),
+               ("OEBPS/c1.xhtml", "<html><head><style>p{}</style></head><body><h1>第一章</h1><p>阿青到了。</p></body></html>"),
+               ("OEBPS/c2.xhtml", "<html><body><p>第二章正文</p></body></html>")])
+_et = _S._decode_bytes("b.epub", _ep)
+check("读取·epub 按书脊顺序", _et.index("第一章") < _et.index("第二章") and "p{}" not in _et, _et)
+check("读取·html 去 script", _S._decode_bytes("a.html", b"<html><script>x()</script><body><p>\xe7\x94\xb2</p></body></html>") == "甲")
+check("读取·rtf GBK 转义", _S._decode_bytes("a.rtf", br"{\rtf1\ansi{\fonttbl{\f0 SimSun;}}\pard \'b0\'a2\'c7\'e0 said\par x}").startswith("阿青 said\nx"))
+_pc = ("BT /F1 12 Tf (Hello world this is a plain text pdf with enough letters to pass) Tj ET").encode("latin-1"); _pz = _zl.compress(_pc)
+_pdf = b"%PDF-1.4\n1 0 obj<</Length " + str(len(_pz)).encode() + b"/Filter/FlateDecode>>stream\n" + _pz + b"\nendstream\nendobj\n%%EOF"
+check("读取·pdf 文本型可抽", "Hello world" in _S._decode_bytes("a.pdf", _pdf))
+try:
+    _S._decode_bytes("a.pdf", b"%PDF-1.4 nothing here"); check("读取·pdf 不可读报错", False)
+except ValueError as e:
+    check("读取·pdf 不可读报错", "PDF" in str(e))
+try:
+    _S._decode_bytes("a.doc", b"\xd0\xcf\x11\xe0"); check("读取·.doc 明确拒绝", False)
+except ValueError as e:
+    check("读取·.doc 明确拒绝", ".docx" in str(e))
+_zx = _S._expand_files([("材料.zip", _mk_zip([("__MACOSX/._a.txt", "junk"), ("dir/a.txt", "甲文"), ("dir/a.md", "乙文"), ("b.docx", _mk_docx(["丙文"])), ("c.doc", b"old")])),
+                        ("dir/a.txt", b"same name")])
+_names = [n for n, _, _ in _zx]
+check("读取·zip 展开且跳过 __MACOSX", "a.txt" in _names and "b.docx" in _names and not any("._a" in n for n in _names), _names)
+check("读取·zip 同名去重（按主干名，落盘统一 .txt 故 a.txt/a.md 也算同名）", len({os.path.splitext(n)[0] for n in _names}) == len(_names) and "a-3.txt" in _names, _names)
+check("读取·zip 内 .doc 带错误不炸", any(e for n, _, e in _zx if n == "c.doc"), _zx)
+check("读取·zip 内 docx 已解码", any(t == "丙文\n\nA\tB\nC & D" for n, t, _ in _zx if n == "b.docx"), [t for n, t, _ in _zx if n == "b.docx"])
+check("API·响应归一 成功", _S._json_norm(200, {"data": 1}) == {"data": 1, "ok": True, "success": True})
+check("API·响应归一 失败补 error", _S._json_norm(400, {})["ok"] is False and _S._json_norm(400, {})["error"])
+check("API·响应归一 不覆盖显式 ok", _S._json_norm(200, {"ok": False, "error": "x"})["success"] is False)
+check("API·schema 覆盖 health/formats/cmd", {e["path"] for e in _S._api_schema()["endpoints"]} >= {"/api/health", "/api/formats", "/cmd", "/api/graph/ontology/generate"})
+check("API·health 字段", {"version", "llm_active", "running", "round", "num_ledger"} <= set(_S._health_payload()))
+check("版本·pack-release 读 serve.VERSION", _S.VERSION and _S.VERSION[0].isdigit())
 check("话量均分→观察告警", bool(_dp2.speech_balance([("甲", 40), ("乙", 41), ("丙", 39), ("丁", 40)])))
 check("话量长尾→不告警", _dp2.speech_balance([("甲", 90), ("乙", 12), ("丙", 30), ("丁", 4)]) is None)
 check("两人戏不算均分", _dp2.speech_balance([("甲", 40), ("乙", 40)]) is None)

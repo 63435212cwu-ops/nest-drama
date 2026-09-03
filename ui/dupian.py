@@ -106,6 +106,17 @@ RULES = [
     # 八、全知群像（反应必须挂具名的人）
     ("全知群像", r"(所有人都|众人(都)?|每个人都)[^。；！？\n]{0,10}(倒吸|愣住|沉默|看向|屏住)|空气(仿佛)?凝固", ARG, None, "指纹库"),
 
+    # 八b、欲言又止 / 拟人沉默 / 含糊指代（v4：AI 最爱的三种"假留白"）
+    ("欲言又止", r"欲言又止|像是(要|想)说(什么|些什么)[^。；！？\n]{0,8}(却|但|最终|终究|还是)|"
+                 r"(话|字)到(了)?(嘴边|嗓子眼)[^。；！？\n]{0,6}(又)?(咽|吞|收)(了)?回去", ARG, None, "指纹库·同族一致"),
+    ("拟人沉默", r"沉默[^，。；！？\n]{0,6}(蔓延|弥漫|拉长|流淌|发酵|铺开)|安静(得)?(可怕|诡异|反常)|"
+                 r"(沉默|安静|寂静)(像|如同)[^，。；！？\n]{1,8}(压|罩|裹)", ARG, None, "指纹库"),
+    ("含糊指代·某种东西", r"某种(东西|情绪|感觉|力量|预感|说不清的)|说不清(是|道不明)[^，。；！？\n]{0,10}(还是|什么)|"
+                          r"有什么东西(在)?(松|断|裂|沉|碎)(了)?", ARG, None, "指纹库·anti-ai vague"),
+    ("按钮·一字一顿", r"一字一顿(地)?|一字一句(地)?|字字(清晰|清楚|铿锵)|咬着字", DEL, None, "指纹库"),
+    ("时间虚化", r"不知(道)?过了多久|良久[，,]|许久(之后|以后)?[，,]|半晌[，,]", ARG, None, "指纹库·真人多用具体钟点"),
+    ("回忆触发器", r"像是(想起|记起)了什么|(忽然|突然|不知怎么)(想起|记起)(了)?(什么|某)", ARG, None, "指纹库"),
+
     # 九、七情记账词直写（引擎用语泄漏进正文）
     ("记账词泄漏", r"(主导情绪|情绪档|强度[:：]|安档|紧档|危档|崩档|七情|引力值)", DEL, None, "架构纪律"),
 
@@ -341,6 +352,7 @@ def metrics(text):
         "短句率": round(sum(1 for x in L if x <= 10) / len(L), 3),
         "最长句": max(L), "对话率": round(dlg / n, 3),
         "情绪词": len(EMO.findall(body)), "微动作": len(MICRO.findall(body)),
+        "破折号": body.count("——"), "省略号": body.count("……") + body.count("..."),
         "字数": len(body),
     }
 
@@ -356,6 +368,11 @@ def diagnose(text):
             out.append("无喘息：≤10字短句占 %.0f%%（真人 12%%）——每段至少给一个短句" % (m["短句率"] * 100))
         if m["最长句"] > 120:
             out.append("长句失控：最长句 %d 字（真人 99.5%% 在 110 字内）" % m["最长句"])
+    per_k = max(1.0, m["字数"] / 1000.0)
+    if m["破折号"] / per_k > 6 and m["破折号"] >= 4:
+        out.append("破折号成瘾：%d 处/千字（真人 ≤3）——句子该断就用句号，别用破折号把两句焊死" % round(m["破折号"] / per_k))
+    if m["省略号"] / per_k > 10 and m["省略号"] >= 5:
+        out.append("省略号成瘾：%d 处/千字——吞字要靠句子结构，不靠六个点" % round(m["省略号"] / per_k))
     if m["微动作"] > m["情绪词"] and m["微动作"] >= 2:
         out.append("微动作倒挂：微动作 %d 处 > 情绪词 %d 处。真人语料里情绪词是微动作的 150 倍"
                    "（情绪 5.27‰ vs 微动作 0.035‰）——用小动作代替情绪本身就是 AI 腔，该直说就直说"
@@ -421,3 +438,152 @@ PATCH_SYS = (
     "若某处是这个角色声纹卡里写明的**既定签名动作**（每人至多一个，如某人紧张时整领带），那是人物特征不是 AI 腔，原样放回。\n"
     "输出严格 JSON：{\"fixes\":[{\"old\":\"原句原文（逐字照抄）\",\"new\":\"改后句\"}]}。"
     "改不动的原样放回 new。只输出 JSON。")
+
+
+# ── 执法力度：病灶密度裁决（按篇幅归一，替代旧版"绝对 8 处"）────────────────────
+def density_verdict(text, kill_abs=10, kill_min=5, kill_per_k=4.0):
+    """整稿是否"机器手感"到该重推的程度。返回 (kill, 执法级命中数, 每千字密度)。
+
+    旧版按绝对计数（≥8 处）：300 字回合 7 处放行、3000 字回合 8 处枉杀。这里双门：
+    命中 ≥ kill_abs 直接毙；或 命中 ≥ kill_min 且 密度 ≥ kill_per_k/千字。"""
+    hits = [h for h in scan(text) if h[1] != WATCH]
+    n = len(hits)
+    dens = n * 1000.0 / max(len(text or ""), 1)
+    kill = n >= kill_abs or (n >= kill_min and dens >= kill_per_k)
+    return kill, n, round(dens, 1)
+
+
+# ── 十、数目账（零 token）：正文里说出口的数字，从此是事实 ──────────────────────
+# 为什么：账目戏、军务戏、买卖戏全靠数目立信——"五千二百领"下一轮变"五千领"，读者第一个发现，
+# 模型最后一个发现。这里把每轮公共正文里的「数量+单位+所指」抽成账，下一轮注入给每个 agent，
+# 再对新稿做一致性核对：同一所指同一单位数不一样 → 除非角色是明着质疑/改口，否则判毙重推。
+_CN_DIG = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_CN_UNIT = {"十": 10, "百": 100, "千": 1000, "万": 10000, "亿": 100000000}
+
+
+def cn2int(s):
+    """中文数字 → 整数（支持 五千二百、两万三、一十二、十五、三百零六；阿拉伯数字原样转）。失败返回 None。"""
+    s = (s or "").strip().replace(",", "")
+    if not s:
+        return None
+    if re.fullmatch(r"\d+(\.\d+)?", s):
+        return int(float(s)) if float(s) == int(float(s)) else float(s)
+    total, section, num = 0, 0, 0
+    for ch in s:
+        if ch in _CN_DIG:
+            num = _CN_DIG[ch]
+        elif ch in _CN_UNIT:
+            u = _CN_UNIT[ch]
+            if u >= 10000:
+                total = (total + section + num) * u if (total + section + num) else u
+                section, num = 0, 0
+            else:
+                section += (num or 1) * u
+                num = 0
+        else:
+            return None
+    val = total + section + num
+    # 「两万三」「五千二」：末位裸数字承接上一级的十分之一单位
+    tail = re.search(r"([万千百十])([一二两三四五六七八九])$", s)
+    if tail:
+        step = {"万": 1000, "千": 100, "百": 10, "十": 1}[tail.group(1)]
+        val = val - _CN_DIG[tail.group(2)] + _CN_DIG[tail.group(2)] * step
+    return val
+
+
+# 数量词：阿拉伯或中文数字 + 单位；单位表偏古今通用（军务/钱粮/人马/时日/度量）
+_UNITS = ("领|石|斛|斗|升|两|贯|钱|文|铢|匹|骑|人|口|户|名|员|艘|辆|乘|车|船|里|丈|尺|步|亩|顷|"
+          "日|天|夜|月|年|岁|载|更|时辰|刻|个月|万|千|百|担|箩|袋|桶|坛|斤|块|枚|把|张|封|道|条|座|间|万人|千人")
+_NUM = r"(\d[\d,]*(?:\.\d+)?|[一二两三四五六七八九十百千万零〇]{1,8})"
+NUMFACT = re.compile(r"([\u4e00-\u9fff]{0,6}?)(?<![一二两三四五六七八九十百千万零〇\d])" + _NUM + r"\s*(" + _UNITS + r")(?![\u4e00-\u9fff]{0,1}(前|后|之内|以内|上下|左右|开外|多|余))")
+_NUM_NOUN_STOP = set("第共有约计到了是把将给拿凑欠差少多剩还这那其中约莫大概大约不止足足整整只才却便就也又再")
+_DISPUTE = re.compile(r"不对|不是|错了|错账|其实是|其实只有|少报|多报|瞒报|虚报|骗|改口|口误|记错|算错|漏了|"
+                      r"少了|多了|差了|对不上|不符|哪来的|何来|明明|分明")
+
+
+_POST_STOP = set("的，。、；：！？已都便就才也又在是给送到运发入出来去了着过和与及并被把从往向于之其此那这些每各另或若昨今明前后当共约折计")
+
+
+def _noun_of(pre, post, sent):
+    """数量词的所指：中文量词结构优先取**单位之后**的名词（五千二百领→重铠），
+    没有再取单位之前的实词（存粮一千二百石→存粮），都没有则回溯本句上一个名词块。"""
+    cand = ""
+    for ch in post[:4]:
+        if ch in _POST_STOP:
+            break
+        cand += ch
+    if len(cand) >= 1 and not (len(cand) == 1 and cand in "个位名只"):
+        return cand
+    pre = "".join(ch for ch in pre if ch not in _NUM_NOUN_STOP).strip("，,、：:；的了")
+    if len(pre) >= 2:
+        return pre[-4:]
+    m = re.findall(r"[\u4e00-\u9fff]{2,4}", sent)
+    return m[-1] if m else ""
+
+
+def num_facts(text, speaker=""):
+    """抽取正文里的数目事实。返回 [{qty, unit, noun, raw, sent, who}]。只抽公共正文（调用方先裁掉私念）。"""
+    out, seen = [], set()
+    body = re.sub(r"【[^】]{1,4}】", "", text or "")
+    for m in NUMFACT.finditer(body):
+        pre, numtxt, unit = m.group(1), m.group(2), m.group(3)
+        if unit in ("万", "千", "百") and not re.search(r"\d", numtxt):
+            continue                                    # 「三万」单独成量词时通常是模糊修辞（三万里路云和月）
+        q = cn2int(numtxt)
+        if q is None or q == 0 or (isinstance(q, int) and q > 10 ** 9):
+            continue
+        if unit in ("个月",):
+            unit = "月"
+        sent = _sent_of(body, m.start())
+        noun = _noun_of(pre, body[m.end():m.end() + 6], sent)
+        if not noun:
+            continue
+        key = (noun, unit, q)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"qty": q, "unit": unit, "noun": noun, "raw": m.group(0), "sent": sent[:80], "who": speaker})
+    return out
+
+
+def _same_ref(a, b):
+    """两条数目事实是否指同一样东西：单位相同 且 所指名词相同或互含（「重铠」⊂「五千领重铠的重铠」）。"""
+    if a["unit"] != b["unit"]:
+        return False
+    x, y = a["noun"], b["noun"]
+    return x == y or (len(x) >= 2 and x in y) or (len(y) >= 2 and y in x)
+
+
+def num_conflicts(facts, ledger, speaker=""):
+    """新稿数目 vs 账本：同一所指同一单位、数量不同 → 冲突。返回 [(新事实, 账上事实)]。
+    同一角色前后自相矛盾、与他人已说出口的数对不上，都算；调用方用 disputes() 判断是否明着质疑。"""
+    out = []
+    for f in facts:
+        for L in ledger:
+            if _same_ref(f, L) and f["qty"] != L["qty"]:
+                out.append((f, L))
+                break
+    return out
+
+
+def disputes(text, noun=""):
+    """新稿是否在**明着**质疑/改口一个数目（戏剧性对账是好戏，不是错误）。"""
+    body = text or ""
+    if noun:
+        i = body.find(noun)
+        if i >= 0:
+            body = body[max(0, i - 60): i + 80]
+    return bool(_DISPUTE.search(body))
+
+
+def num_ledger_lines(ledger, limit=14):
+    """账本 → 注入提示词的短行（最近优先）。"""
+    rows = []
+    for L in ledger[-limit:]:
+        rows.append("· %s%s%s（R%s%s）" % (L["noun"], _fmt_qty(L["qty"]), L["unit"], L.get("round", "?"),
+                                          ("·" + L["who"]) if L.get("who") else ""))
+    return "\n".join(rows)
+
+
+def _fmt_qty(q):
+    return ("%d" % q) if isinstance(q, int) else ("%g" % q)

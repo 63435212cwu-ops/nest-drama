@@ -33,6 +33,8 @@ from socketserver import ThreadingMixIn
 
 UI_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(UI_DIR)                      # 群像/
+VERSION = "1.1.0"                                        # 发布包/health/响应头共用（pack-release.py 从此处读取）
+STARTED_AT = time.time()
 sys.path.insert(0, UI_DIR)
 try:                                                    # 毒编机检（零 token 语言层）
     import dupian
@@ -69,24 +71,318 @@ def _mtimes():
     return out
 
 
-def _decode_bytes(name, raw):
-    """按扩展名解码文件字节 → 纯文本（.txt/.md utf-8→gbk 回退；.docx 标准库解包）。"""
-    import io
-    import re as _re
-    import zipfile
-    name = (name or "").lower()
-    if name.endswith(".docx"):
-        with zipfile.ZipFile(io.BytesIO(raw)) as z:
-            xml = z.read("word/document.xml").decode("utf-8", "ignore")
-        xml = _re.sub(r"<w:p[ >]", "\n<w:p ", xml)
-        text = _re.sub(r"<[^>]+>", "", xml)
-        return _re.sub(r"\n{3,}", "\n\n", text).strip()
-    if name.endswith(".doc"):
-        raise ValueError("旧版 .doc 不支持，请另存为 .docx 或 .txt")
+# ── 材料读取层 ─────────────────────────────────────────────────────────────────
+# 原则：能用标准库解的格式都解（zipfile/zlib/html/re 足够覆盖 docx/odt/epub/html/rtf/zip 与尽力版 pdf）；
+# 解不出的给**可执行的**提示（"另存为 .docx/.txt"），不吞错；文本一律规整为 NFC + \n。
+TEXT_EXTS = (".txt", ".md", ".markdown", ".text", ".json", ".csv", ".tsv", ".yaml", ".yml", ".log", ".ini", ".srt")
+FORMATS = [
+    {"ext": ".txt / .md / .markdown / .csv / .json / .yaml / .log / .srt", "how": "纯文本；自动嗅探 UTF-8(BOM) / UTF-16 / UTF-32 / GB18030 / Big5"},
+    {"ext": ".docx", "how": "Word 2007+：段落、换行、制表、表格单元格；页眉页脚不读"},
+    {"ext": ".odt", "how": "OpenDocument 文本：段落 / 标题 / 换行"},
+    {"ext": ".epub", "how": "电子书：按 OPF 书脊顺序抽正文，去标签"},
+    {"ext": ".html / .htm / .xhtml", "how": "去 script/style 与标签，保留段落换行"},
+    {"ext": ".rtf", "how": "富文本：解 \\'xx（GBK）与 \\uN 转义，剥控制字"},
+    {"ext": ".zip", "how": "压缩包：递归展开其中所有受支持文件（跳过 __MACOSX / 隐藏文件），每个文件独立成一份材料"},
+    {"ext": ".pdf", "how": "尽力抽取（仅限文本型、非 CID 字体的 PDF）；抽不出可读文字时报错并建议转 .txt/.docx"},
+    {"ext": ".doc", "how": "不支持（二进制旧格式）：请在 Word 里另存为 .docx 或 .txt"},
+]
+MAX_FILE_BYTES = 64 * 1024 * 1024        # 单文件上限：超过基本不是稿件而是误投
+MAX_BODY_BYTES = 512 * 1024 * 1024       # 单次请求体上限（本地服务也不让一个请求把内存吃光）
+
+
+def _norm_text(t):
+    import unicodedata
+    t = t.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
+    t = t.replace("\ufeff", "").replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\xa0", " ")
+    t = unicodedata.normalize("NFC", t)
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
+
+
+def _decode_text(raw):
+    """字节 → 文本：BOM 优先；再 UTF-8 严格；再看 NUL 分布判 UTF-16；再 GB18030（GBK 超集）；再 Big5；最后 UTF-8 容错。"""
+    if not raw:
+        return ""
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw[3:].decode("utf-8", "replace")
+    if raw.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        return raw.decode("utf-32", "replace")
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16", "replace")
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
-        return raw.decode("gbk", "replace")
+        pass
+    # 非 UTF-8：候选编码各解一遍，按"像不像人写的字"打分（常用汉字/ASCII/中文标点得分，
+    # 罕见区/私用区/替换符扣分）。纯中文 UTF-16 没有 NUL 字节，旧版的 NUL 密度法认不出来，
+    # 会被 GBK 解成「鵩蚫eg哊」这种鬼字——打分法能把它挑出来。
+    cands = []
+    for enc in ("gb18030", "big5", "utf-16-le", "utf-16-be"):
+        try:
+            cands.append((enc, raw.decode(enc, "replace")))
+        except Exception:
+            continue
+
+    def _score(t):
+        if not t:
+            return -1
+        n = min(len(t), 6000); good = bad = 0
+        for ch in t[:n]:
+            o = ord(ch)
+            if 0x4E00 <= o <= 0x9FFF or 0x20 <= o < 0x7F or ch in "，。！？、；：「」『』“”‘’…—（）《》\n\t":
+                good += 1
+            elif ch == "\ufffd" or 0xE000 <= o <= 0xF8FF or 0x3400 <= o <= 0x4DBF or o >= 0x20000 or o < 0x20 and ch not in "\r\n\t":
+                bad += 1
+        return (good - 3 * bad) / n
+    best = max(cands, key=lambda c: _score(c[1])) if cands else None
+    if best and _score(best[1]) > 0.5:
+        return best[1]
+    return raw.decode("utf-8", "replace")
+
+
+def _strip_tags(xml, para_tags=(), br_tags=(), tab_tags=(), cell_tags=()):
+    import html as _html
+    for t in para_tags:
+        xml = re.sub(r"<%s(?=[\s>/])[^>]*>" % re.escape(t), "\n", xml)
+        xml = re.sub(r"</%s>" % re.escape(t), "\n", xml)
+    for t in br_tags:
+        xml = re.sub(r"<%s(?=[\s>/])[^>]*/?>" % re.escape(t), "\n", xml)
+    for t in tab_tags:
+        xml = re.sub(r"<%s(?=[\s>/])[^>]*/?>" % re.escape(t), "\t", xml)
+    for t in cell_tags:
+        xml = re.sub(r"</%s>" % re.escape(t), "\t", xml)
+    xml = re.sub(r"<[^>]+>", "", xml)
+    return _html.unescape(xml)
+
+
+def _decode_docx(raw):
+    import io, zipfile
+    with zipfile.ZipFile(io.BytesIO(raw)) as z:
+        try:
+            xml = z.read("word/document.xml").decode("utf-8", "ignore")
+        except KeyError:
+            raise ValueError("不是有效的 .docx（缺 word/document.xml）——若是旧版 .doc 改了后缀，请用 Word 另存为 .docx")
+    xml = re.sub(r"<w:tab\s*/>", "\t", xml)
+    xml = re.sub(r"<w:(br|cr)\s*/>", "\n", xml)
+    return _strip_tags(xml, para_tags=("w:p",), cell_tags=("w:tc",))
+
+
+def _decode_odt(raw):
+    import io, zipfile
+    with zipfile.ZipFile(io.BytesIO(raw)) as z:
+        try:
+            xml = z.read("content.xml").decode("utf-8", "ignore")
+        except KeyError:
+            raise ValueError("不是有效的 .odt（缺 content.xml）")
+    xml = re.sub(r"<text:s\s*/>", " ", xml)
+    xml = re.sub(r"<text:s\s+text:c=\"(\d+)\"\s*/>", lambda m: " " * int(m.group(1)), xml)
+    return _strip_tags(xml, para_tags=("text:p", "text:h"), br_tags=("text:line-break",), tab_tags=("text:tab",),
+                       cell_tags=("table:table-cell",))
+
+
+def _decode_html(raw):
+    t = _decode_text(raw)
+    t = re.sub(r"(?is)<(script|style|head)[^>]*>.*?</\1>", "", t)
+    return _strip_tags(t, para_tags=("p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "tr", "blockquote", "section", "article"),
+                       br_tags=("br", "hr"), cell_tags=("td", "th"))
+
+
+def _decode_epub(raw):
+    import io, zipfile, posixpath
+    with zipfile.ZipFile(io.BytesIO(raw)) as z:
+        names = z.namelist()
+        order = []
+        try:
+            cont = z.read("META-INF/container.xml").decode("utf-8", "ignore")
+            opf = re.search(r'full-path="([^"]+)"', cont).group(1)
+            base = posixpath.dirname(opf)
+            opfx = z.read(opf).decode("utf-8", "ignore")
+            items = dict(re.findall(r'<item[^>]*\bid="([^"]+)"[^>]*\bhref="([^"]+)"', opfx))
+            items.update({k: v for v, k in re.findall(r'<item[^>]*\bhref="([^"]+)"[^>]*\bid="([^"]+)"', opfx)})
+            for ref in re.findall(r'<itemref[^>]*\bidref="([^"]+)"', opfx):
+                if ref in items:
+                    order.append(posixpath.normpath(posixpath.join(base, items[ref])))
+        except Exception:
+            order = []
+        if not order:
+            order = sorted(n for n in names if n.lower().endswith((".xhtml", ".html", ".htm")))
+        parts = []
+        for n in order:
+            if n in names:
+                parts.append(_decode_html(z.read(n)))
+    if not parts:
+        raise ValueError("epub 里没有可读的正文页")
+    return "\n\n".join(p for p in parts if p.strip())
+
+
+def _decode_rtf(raw):
+    """RTF → 文本（够用版）：处理 \\'xx 单字节转义（按 GBK/CP936）、\\uN 转义、跳过字体/颜色/样式表组。"""
+    t = raw.decode("latin-1")
+    out, i, n = [], 0, len(t)
+    skip_depth, depth, uc_skip = 0, 0, 1
+    pend = bytearray()
+
+    def flush():
+        if pend:
+            out.append(pend.decode("gb18030", "replace")); pend.clear()
+    while i < n:
+        ch = t[i]
+        if ch == "{":
+            depth += 1; i += 1
+            if re.match(r"\\(fonttbl|colortbl|stylesheet|info|pict|\*)", t[i:i + 12]):
+                skip_depth = depth
+            continue
+        if ch == "}":
+            if skip_depth == depth:
+                skip_depth = 0
+            depth -= 1; i += 1; continue
+        if ch == "\\":
+            m = re.match(r"\\'([0-9a-fA-F]{2})", t[i:i + 4])
+            if m:
+                if not skip_depth:
+                    pend.append(int(m.group(1), 16))
+                i += 4; continue
+            m = re.match(r"\\u(-?\d+)\s?", t[i:])
+            if m:
+                flush()
+                if not skip_depth:
+                    cp = int(m.group(1)); cp = cp + 65536 if cp < 0 else cp
+                    out.append(chr(cp))
+                i += m.end()
+                # \uN 后跟随 uc_skip 个替代字符，跳过
+                j = 0
+                while j < uc_skip and i < n:
+                    if t[i] == "\\" and re.match(r"\\'[0-9a-fA-F]{2}", t[i:i + 4]):
+                        i += 4
+                    elif t[i] not in "{}\\":
+                        i += 1
+                    else:
+                        break
+                    j += 1
+                continue
+            m = re.match(r"\\([a-zA-Z]+)(-?\d+)? ?", t[i:])
+            if m:
+                w = m.group(1)
+                if not skip_depth:
+                    flush()
+                    if w in ("par", "line", "sect", "page"):
+                        out.append("\n")
+                    elif w == "tab":
+                        out.append("\t")
+                    elif w == "uc" and m.group(2):
+                        uc_skip = int(m.group(2))
+                i += m.end(); continue
+            if i + 1 < n and t[i + 1] in "{}\\":
+                if not skip_depth:
+                    flush(); out.append(t[i + 1])
+                i += 2; continue
+            i += 1; continue
+        if not skip_depth and ch not in "\r\n":
+            pend.append(ord(ch) if ord(ch) < 256 else 63)
+        i += 1
+    flush()
+    return "".join(out)
+
+
+def _decode_pdf(raw):
+    """尽力版 PDF 文本抽取（零依赖）：FlateDecode 流 → BT/ET 里的 Tj/TJ 字串。
+    仅对文本型、非 CID 字体的 PDF 有效；CJK 常用的 Identity-H 编码抽出来是乱码，
+    这里用可读率校验，不达标就明确报错，绝不把乱码当材料喂给模型。"""
+    import zlib
+    texts = []
+    for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", raw, re.S):
+        data = m.group(1)
+        try:
+            data = zlib.decompress(data)
+        except Exception:
+            pass
+        for blk in re.findall(rb"BT(.*?)ET", data, re.S):
+            for sm in re.finditer(rb"\((?:\\.|[^\\)])*\)|<[0-9A-Fa-f\s]+>", blk):
+                tok = sm.group(0)
+                if tok.startswith(b"("):
+                    body = re.sub(rb"\\([nrtbf()\\])", lambda x: {b"n": b"\n", b"r": b"", b"t": b"\t", b"b": b"", b"f": b""}.get(x.group(1), x.group(1)), tok[1:-1])
+                    texts.append(body.decode("latin-1"))
+                else:
+                    hx = re.sub(rb"\s", b"", tok[1:-1])
+                    try:
+                        bb = bytes.fromhex(hx.decode())
+                        texts.append(bb.decode("utf-16-be", "ignore") if len(bb) % 2 == 0 else bb.decode("latin-1"))
+                    except Exception:
+                        pass
+            texts.append("\n")
+    txt = _norm_text("".join(texts))
+    good = sum(1 for c in txt if "\u4e00" <= c <= "\u9fff" or c.isalnum() or c in "，。！？、；：「」“”…\n ")
+    if len(txt) < 40 or good / max(1, len(txt)) < 0.6:
+        raise ValueError("PDF 抽不出可读文字（扫描件或 CID 字体）：请用阅读器「另存为文本」或转 .docx 后再投")
+    return txt
+
+
+ZIP_SKIP = ("__macosx/", ".ds_store", "thumbs.db", "desktop.ini")
+
+
+def _decode_bytes(name, raw):
+    """按扩展名解码文件字节 → 纯文本。不认识的扩展名按文本嗅探（多数导出稿本就是文本）。"""
+    name = (name or "").lower()
+    if len(raw or b"") > MAX_FILE_BYTES:
+        raise ValueError("文件超过 %d MB 上限，请拆分后再投" % (MAX_FILE_BYTES // 1024 // 1024))
+    if name.endswith(".docx"):
+        return _norm_text(_decode_docx(raw))
+    if name.endswith(".odt"):
+        return _norm_text(_decode_odt(raw))
+    if name.endswith(".epub"):
+        return _norm_text(_decode_epub(raw))
+    if name.endswith((".html", ".htm", ".xhtml")):
+        return _norm_text(_decode_html(raw))
+    if name.endswith(".rtf"):
+        return _norm_text(_decode_rtf(raw))
+    if name.endswith(".pdf"):
+        return _decode_pdf(raw)
+    if name.endswith(".doc"):
+        raise ValueError("旧版 .doc 不支持，请另存为 .docx 或 .txt")
+    if name.endswith((".zip", ".pptx", ".xlsx", ".pages", ".key", ".numbers")):
+        raise ValueError("该格式不能作为单份材料解码（zip 请走多文件展开；办公套件请导出为 .docx/.txt）")
+    return _norm_text(_decode_text(raw))
+
+
+def _expand_files(files):
+    """上传文件列表 → 解码后的 (显示名, 文本, 错误) 列表；.zip 递归展开为多份材料；同名自动去重。"""
+    import io, zipfile
+    out, seen = [], {}
+
+    def _push(name, text, err=None):
+        base = os.path.basename(name.replace("\\", "/")) or "未命名"
+        stem, ext = os.path.splitext(base)
+        stem = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", stem).strip() or "未命名"
+        key = stem.lower()
+        if key in seen:
+            seen[key] += 1; stem = "%s-%d" % (stem, seen[key])
+        else:
+            seen[key] = 1
+        out.append((stem + ext, text, err))
+
+    def _walk(name, raw, depth):
+        low = name.lower()
+        if low.endswith(".zip") and depth < 3:
+            try:
+                with zipfile.ZipFile(io.BytesIO(raw)) as z:
+                    for info in z.infolist():
+                        n = info.filename
+                        if info.is_dir() or any(k in n.lower() for k in ZIP_SKIP) or os.path.basename(n).startswith("."):
+                            continue
+                        try:
+                            n2 = n.encode("cp437").decode("gb18030") if info.flag_bits & 0x800 == 0 else n
+                        except Exception:
+                            n2 = n
+                        _walk(n2, z.read(info), depth + 1)
+            except zipfile.BadZipFile:
+                _push(name, "", "不是有效的 zip 压缩包")
+            return
+        try:
+            _push(name, _decode_bytes(name, raw))
+        except Exception as e:
+            _push(name, "", str(e))
+    for name, raw in files:
+        _walk(name, raw, 0)
+    return out
 
 
 def _parse_multipart(raw, ctype):
@@ -1849,6 +2145,100 @@ def _dupian_pass(text, cfg, name, lg):
     return text
 
 
+def _update_num_ledger(D, turns, rnd, candlog):
+    """数目账推进（零 token）：把本轮各主笔**公共正文**里的数目事实入账。
+    同一所指同一单位若已有账且数不同：角色明着对账 → 记为「改口」并以新数为准（戏剧性对账是好戏）；
+    没明说 → 保留旧账、记一笔告警（本轮正文已落盘，不回改；下一轮注入时旧数仍是事实）。"""
+    if not dupian or not hasattr(dupian, "num_facts"):
+        return
+    led = D.setdefault("numLedger", [])
+    for name, text in turns:
+        pub = _public_cut(text or "")
+        for f in dupian.num_facts(pub, name):
+            same = [L for L in led if dupian._same_ref(f, L)]
+            if same and same[-1]["qty"] != f["qty"]:
+                if dupian.disputes(pub, f["noun"]):
+                    candlog.append("数目账：%s 改口 %s%s%s → %s%s（R%s）" % (
+                        name, f["noun"], dupian._fmt_qty(same[-1]["qty"]), f["unit"],
+                        dupian._fmt_qty(f["qty"]), f["unit"], rnd))
+                else:
+                    candlog.append("数目账·对不上：%s 写「%s」，账上 R%s 为 %s%s%s（保留旧账）" % (
+                        name, f["raw"], same[-1].get("round", "?"), f["noun"],
+                        dupian._fmt_qty(same[-1]["qty"]), f["unit"]))
+                    continue
+            elif same:
+                continue                                  # 同数复述，不重复入账
+            f["round"] = rnd
+            led.append({k: f[k] for k in ("qty", "unit", "noun", "raw", "who", "round")})
+    led[:] = led[-120:]
+
+
+def _json_norm(code, obj):
+    """响应结构归一（只增不改，兼容旧前端）：所有 JSON 响应都带 ok 与 success 两个同义布尔，
+    出错响应保证有 error 字串。历史上三种写法（{ok}/{success,data}/{error}）并存，调用方得猜。"""
+    if not isinstance(obj, dict):
+        return obj
+    o = dict(obj)
+    flag = o.get("ok") if "ok" in o else o.get("success")
+    if flag is None:
+        flag = code < 400 and not o.get("error")
+    o.setdefault("ok", bool(flag))
+    o.setdefault("success", bool(flag))
+    if not flag and not o.get("error"):
+        o["error"] = "请求失败（HTTP %d）" % code
+    return o
+
+
+def _health_payload():
+    D = _load_data() or {}
+    meta = D.get("meta", {}) or {}
+    return {"name": "NEST-DRAMA", "version": VERSION, "python": sys.version.split()[0],
+            "uptime_s": int(time.time() - STARTED_AT), "pid": os.getpid(),
+            "llm_configured": bool(_llm_cfg(ignore_mode=True)), "llm_active": bool(_llm_cfg()),
+            "running": bool(AUTO.get("running")), "phase": AUTO.get("phase", ""),
+            "built": bool(meta.get("built")), "round": int(meta.get("round", 0) or 0),
+            "unit": meta.get("unitName", ""), "cast": len(D.get("cast", [])),
+            "num_ledger": len(D.get("numLedger", [])), "queue": len(_load_queue().get("queue", [])),
+            "root": os.path.basename(ROOT_DIR)}   # 只报库名：绝对路径含本机用户名，不外发
+
+
+def _api_schema():
+    """端点清单（人读 + 机读）。返回结构统一为 {ok, success, ...}；门面线为 {success, data}。"""
+    E = lambda m, p, what, req="", res="": {"method": m, "path": p, "what": what, "request": req, "response": res}
+    return {"name": "NEST-DRAMA API", "version": VERSION, "base": "http://127.0.0.1:%d" % PORT,
+            "conventions": ["所有 JSON 响应含 ok/success 同义布尔；失败时含 error 字串",
+                            "门面线（/api/graph/*、/api/archives*、/api/simulation*）成功体为 {success:true, data:{…}}",
+                            "推演指令统一走 POST /cmd {type, payload}",
+                            "实时进度走 SSE GET /events（event: progress|data|hello）",
+                            "静态文件只放行 index/assets/enhance/data.json/seal.svg；其余 403"],
+            "endpoints": [
+                E("GET", "/api/health", "健康与版本：llm/running/round/unit/账本规模"),
+                E("GET", "/api/schema", "本清单"),
+                E("GET", "/api/formats", "材料支持格式与大小上限"),
+                E("GET", "/api/auto-status", "推演进度全量载荷（与 SSE progress 同构）"),
+                E("GET", "/api/usage", "按模型累计的 token 估算"),
+                E("GET", "/api/llm-config", "API 档案（密钥掩码）"),
+                E("POST", "/api/llm-config", "保存/选择/删除 API 档案", "{action:save|select|delete|mode, base_url, model, api_key, id}"),
+                E("POST", "/api/llm-test", "连通性测试", "{base_url, model, api_key}（可省，用当前档）", "{ok, reply, error}"),
+                E("GET", "/api/round/{n}", "某轮全文 markdown", "", "{round, md, path}"),
+                E("POST", "/api/graph/ontology/generate", "投放材料并建世界（multipart）",
+                  "files[] + project_name + simulation_requirement；支持 " + " ".join(f["ext"].split(" / ")[0] for f in FORMATS[:8]),
+                  "{data:{status, files, chars, skipped, mode}}"),
+                E("GET", "/api/graph/task/{id}", "建世界进度", "", "{data:{status: processing|completed|failed, progress, message}}"),
+                E("GET", "/api/archives", "历史局列表（同名折叠）"),
+                E("GET", "/api/archives/{id}", "历史局只读 data.json"),
+                E("GET", "/api/archives/{id}/round/{n}", "历史局某轮全文"),
+                E("POST", "/api/archives", "历史局维护", "{action: prune|restore, id}"),
+                E("DELETE", "/api/archives", "删除一条历史记录", "{title}"),
+                E("DELETE", "/api/simulation", "删除当前项目（先归档，可回滚）"),
+                E("POST", "/api/simulation/start", "开始/继续推演", "{max_rounds}"),
+                E("POST", "/api/simulation/stop", "暂停（当前 LLM 调用完成即停）"),
+                E("POST", "/cmd", "推演指令", "{type: init|beat|pause|interview|report|gravity|gravity-mode|continue-story|export|reset-sim|delete-sim|turing-repair|turing-retest, payload}"),
+                E("GET", "/events", "SSE 实时流"),
+                E("GET", "/exports/{name}", "下载导出的故事全录"),
+            ]}
+
+
 GRAVITY_PATH = os.path.join(UI_DIR, "gravity.json")
 
 
@@ -2048,6 +2438,8 @@ def _auto_round(log):
     AUTO["agents"] = leads                              # 本轮活跃角色 agent（各自隔离：只见公共实录+自己的三卡）
     AUTO["stepDone"], AUTO["stepTotal"] = 0, max(1, len(leads) + len(extras))
 
+    num_led = (D.get("numLedger") or [])[-40:]           # 数目账（零 token）：本轮所有主笔共见
+
     def _one_turn(name, stance, fresh):
         """单主笔（线程安全）：成文→机检粗筛→监修官四刀（毙才重推≤3）→毒编本地修+定点补丁。
         stance=本轮身份提示（驱动者/被找上的人/在场主笔）；fresh=本轮刚发生的对面动作（公共部分）。"""
@@ -2084,6 +2476,10 @@ def _auto_round(log):
                      "但不能违背它们已经写死的事（你的身份、你会与不会的事、你与谁有过什么）。\n"
                      + (("已经出场过的次要人物（他们的下场已经落定，"
                          "不许让死了的人再出现、也不许当作没发生过）：\n" + _ex) if _ex else ""))
+        if num_led and dupian and hasattr(dupian, "num_ledger_lines"):
+            parts.append("【数目账 · 这局已说出口的数字，从此是事实】\n" + dupian.num_ledger_lines(num_led)
+                         + "\n数要具体、要对得上账：引用时照账上的数；你的角色若认为账不对，就当面质疑或改口，"
+                           "把对账写成戏——不许悄悄换个数。你不记得的数就说不记得，别编一个圆整的。")
         parts.append("【你此刻的身份】" + stance)
         parts.append("现在是第%d轮（本单元第%d/%d轮）。以%s的身份行动。"
                      % (rnd, U["used"] + 1, U["budget"], name))
@@ -2100,11 +2496,34 @@ def _auto_round(log):
                     return name, None, "已暂停", lg
                 return name, None, "角色agent失败(%s)：%s" % (name, err), lg
             dense = ([h for h in dupian.scan(text) if h[1] != "观"] if dupian else _scan_tics(text))
-            if len(dense) >= 8:                    # 病灶密集=整稿是机器手感，重推比修便宜
+            # 病灶密集=整稿是机器手感，重推比修便宜。密度按篇幅归一（dupian.density_verdict）：
+            # 旧版绝对 8 处——300 字 7 处放行、3000 字 8 处枉杀，两头都不准。
+            if dupian and hasattr(dupian, "density_verdict"):
+                _kill, _n, _dens = dupian.density_verdict(text)
+            else:
+                _kill, _n, _dens = len(dense) >= 8, len(dense), 0
+            if _kill:
                 critique = "语言病灶 %d 处密集命中（%s）。换一种写法：情绪该说就说，别用小动作代演。" % (
-                    len(dense), "、".join(h[0] for h in dense[:4]))
-                lg.append("%s：审%d机检密集毙（%d处）→重推" % (name, attempt + 1, len(dense)))
+                    _n, "、".join(h[0] for h in dense[:4]))
+                lg.append("%s：审%d机检密集毙（%d处·%.1f/千字）→重推" % (name, attempt + 1, _n, _dens))
                 continue
+            # 数目账核对（零 token）：说出口的数字是事实。同一所指同一单位数对不上，
+            # 除非角色是明着质疑/改口（那是好戏），否则判毙重推——模型最不擅长的恰是记住自己说过的数。
+            if dupian and hasattr(dupian, "num_conflicts") and num_led:
+                _pub = _public_cut(text)
+                _confs = dupian.num_conflicts(dupian.num_facts(_pub, name), num_led, name)
+                _bad = [(f, L) for f, L in _confs if not dupian.disputes(_pub, f["noun"])]
+                if _bad and attempt < 2:
+                    f, L = _bad[0]
+                    critique = ("数目对不上：你写「%s」，可账上第 %s 轮%s已说的是 %s%s%s。要么照账上的数，"
+                                "要么让角色明着质疑/改口（把对账写成戏），不许悄悄换数。"
+                                % (f["raw"], L.get("round", "?"), ("（%s）" % L["who"]) if L.get("who") else "",
+                                   L["noun"], dupian._fmt_qty(L["qty"]), L["unit"]))
+                    lg.append("%s：审%d数目毙（%s≠%s%s）→重推" % (name, attempt + 1, f["raw"],
+                                                                dupian._fmt_qty(L["qty"]), L["unit"]))
+                    continue
+                elif _bad:
+                    lg.append("%s：数目残留（%s）" % (name, "、".join(f["raw"] for f, _ in _bad[:2])))
             # 监修产出只是一行判词（【过】/【毙…】）＝判定活，关思考：实测 12.8s → 4.6s。
             # 额度回到 900：光砍额度不关思考反而危险——实测 500 额度开思考时 816 字全烧在思考上、
             # 正文 0 字，白触发一次自愈重试，比不砍更慢。
@@ -2334,6 +2753,10 @@ def _auto_round(log):
             candlog.append("主线债：连续 %d 轮未推进主线节点（下轮场记将优先主线）" % ledger["mainDebt"])
     except Exception as e:                                # 账目层永不许炸轮——本轮正文已落盘
         log("R%d 剧情账更新失败（不影响本轮落盘）：%s" % (rnd, e))
+    try:
+        _update_num_ledger(D, turns, rnd, candlog)   # 数目账：说出口的数字入账，下一轮所有 agent 共见
+    except Exception as e:
+        log("R%d 数目账更新失败：%s" % (rnd, e))
     try:
         _update_extras(D, R, rnd, log)          # 路人账：不进卡司/图谱，但从此不可被改写
     except Exception as e:
@@ -4333,13 +4756,18 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/graph/ontology/generate" and method == "POST":
             files, fields = body  # multipart 已解析
             files, fields = (files or []), (fields or {})
-            texts = []
-            for name, raw in files:
-                try:
-                    texts.append("《%s》\n%s" % (name, _decode_bytes(name, raw)))
-                except Exception as e:
-                    texts.append("《%s》[解码失败: %s]" % (name, e))
+            expanded = _expand_files(files)               # zip 展开、编码嗅探、同名去重
+            texts, bad = [], []
+            for name, text, err in expanded:
+                if err:
+                    bad.append("%s：%s" % (name, err))
+                    texts.append("《%s》[解码失败: %s]" % (name, err))
+                else:
+                    texts.append("《%s》\n%s" % (name, text))
             raw = "\n\n".join(texts)
+            if expanded and all(e for _, _, e in expanded):
+                return self._json(422, {"success": False, "error": "没有一份材料能读出文字：" + "；".join(bad)[:400],
+                                        "formats": FORMATS})
             title = fields.get("project_name", "") or "新局"
             req = fields.get("simulation_requirement", "")
             # 材料落盘（引擎与自动建世界共用）
@@ -4348,13 +4776,12 @@ class Handler(SimpleHTTPRequestHandler):
             # 注：不在此处删旧材料——归档（_archive_old_world）在建世界线程里之后才跑，
             # 先删会让旧材料进不了回滚点。改由 _ingest_materials 只读本批投放文件（见 pending.files）
             saved = []
-            for name, rawb in files:
-                fn = os.path.splitext(os.path.basename(name))[0] + ".txt"
-                try:
-                    open(os.path.join(mat, fn), "w", encoding="utf-8").write(_decode_bytes(name, rawb))
-                    saved.append("材料/" + fn)
-                except Exception:
+            for name, text, err in expanded:
+                if err or not text.strip():
                     continue
+                fn = os.path.splitext(name)[0] + ".txt"
+                open(os.path.join(mat, fn), "w", encoding="utf-8").write(text)
+                saved.append("材料/" + fn)
             if _auto_running_fatal():
                 _reclaim_stale_run()
             auto = bool(_llm_cfg()) and not _auto_running()
@@ -4376,6 +4803,8 @@ class Handler(SimpleHTTPRequestHandler):
                                    "then_run": False})
             return ok({"project_id": "qx", "status": "ontology_generated",
                        "project_name": title, "simulation_requirement": req,
+                       "files": saved, "chars": sum(len(t) for _, t, e in expanded if not e),
+                       "skipped": bad,
                        "mode": "独立API·自动建世界" if auto else "API未就绪·已入队待自动执行"})
         if path.startswith("/api/graph/task/"):
             if built:
@@ -4559,8 +4988,9 @@ class Handler(SimpleHTTPRequestHandler):
         return self._json(404, {"success": False, "error": "facade: 未映射端点 " + path})
 
     def _json(self, code, obj):
-        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        body = json.dumps(_json_norm(code, obj), ensure_ascii=False).encode("utf-8")
         self.send_response(code)
+        self.send_header("X-NEST-Version", VERSION)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
@@ -4571,7 +5001,7 @@ class Handler(SimpleHTTPRequestHandler):
         """静态资产禁缓存：bundle/css/data 改了强刷即见。send_response 会重置头缓冲，
         故不能在下发前预置头，只能在 end_headers 收口时补。"""
         rel = self.path.lstrip("/").split("?")[0]
-        if rel.startswith("assets/") or rel in ("data.json", "seal.svg", "ui-adjustments.js",
+        if rel.startswith("assets/") or rel in ("data.json", "seal.svg", "ui-adjustments.js", "enhance.js", "enhance.css",
                                                 "favicon.ico", "THIRD-PARTY-LICENSES.txt"):
             try:
                 self.send_header("Cache-Control", "no-store")
@@ -4614,6 +5044,13 @@ class Handler(SimpleHTTPRequestHandler):
                                     "usage": usage})
         if u.path == "/api/auto-status":
             return self._json(200, _auto_payload())
+        if u.path in ("/api/health", "/api/version"):
+            return self._json(200, _health_payload())
+        if u.path == "/api/formats":
+            return self._json(200, {"formats": FORMATS, "max_file_mb": MAX_FILE_BYTES // 1024 // 1024,
+                                    "max_body_mb": MAX_BODY_BYTES // 1024 // 1024})
+        if u.path in ("/api/schema", "/api/"):
+            return self._json(200, _api_schema())
         if u.path.startswith("/api/"):
             return self._facade("GET", u.path, parse_qs(u.query), None)
         if self.path == "/events":
@@ -4681,7 +5118,7 @@ class Handler(SimpleHTTPRequestHandler):
         # 静态白名单：ui/ 里只有前端资产可直出；运行态 .json（凭据/用量/局史/数据）一律 403。
         # 旧版对 .json 无拦截——api-config.json 明文密钥可被同机任意进程/网页匿名 GET。
         rel = self.path.lstrip("/").split("?")[0]
-        if not (rel.startswith("assets/") or rel in ("seal.svg", "ui-adjustments.js",
+        if not (rel.startswith("assets/") or rel in ("seal.svg", "ui-adjustments.js", "enhance.js", "enhance.css",
                                                      "data.json", "favicon.ico",
                                                      "THIRD-PARTY-LICENSES.txt")):
             return self._json(403, {"error": "禁止访问：%s（运行态文件不外发）" % rel})
@@ -4744,6 +5181,8 @@ class Handler(SimpleHTTPRequestHandler):
         if u.path.startswith("/api/"):
             ctype = self.headers.get("Content-Type", "")
             n = int(self.headers.get("Content-Length", 0) or 0)
+            if n > MAX_BODY_BYTES:
+                return self._json(413, {"error": "请求体超过 %d MB 上限，请分批投放材料" % (MAX_BODY_BYTES // 1024 // 1024)})
             raw = self.rfile.read(n) if n else b""
             if ctype.startswith("multipart/form-data"):
                 body = _parse_multipart(raw, ctype)          # (files, fields)

@@ -22,10 +22,18 @@ import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 UI = os.path.join(HERE, "ui")
-VERSION = "v1.0.0"
+def _read_version():
+    """版本号单一来源：ui/serve.py 里的 VERSION（health 端点与响应头用的同一个值）。"""
+    m = re.search(r'^VERSION\s*=\s*"([^"]+)"', open(os.path.join(HERE, "ui", "serve.py"), encoding="utf-8").read(), re.M)
+    return "v" + m.group(1) if m else "v0.0.0"
+
+
+VERSION = _read_version()
 
 ENGINE_FILES = [                                   # 发布白名单：引擎本体，别无其他
     "ui/serve.py",
+    "ui/enhance.js",
+    "ui/enhance.css",
     "ui/dupian.py",
     "ui/test_serve.py",
     "ui/index.html",
@@ -35,6 +43,7 @@ ENGINE_FILES = [                                   # 发布白名单：引擎本
     "ui/assets/index-Dbzr5ZOw.js",
     "ui/assets/index-DPnICO7N.css",
     "README.md",
+    "CHANGELOG.md",                                # 版本变更记录
     "README_CN.md",                                # 中文版门面：中文用户入口（默认英文在 README.md）
     "docs/star-cluster.png",                       # README 介绍图：主星丛
     "docs/character-galaxy.png",                   # README 介绍图：角色星系

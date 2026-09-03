@@ -18,6 +18,12 @@ A unit-story creation engine: build a world for a work, then let independent cha
 - **World-driven plot** — milestones are reached through in-world causality, not authorial forcing
 - **Live galaxy atlas** — the world becomes a growing solar-system-style 3D graph; click a character on the wall to lock onto their planet, double-click a planet to dive into that character's own galaxy
 - **Author control** — gravity mode, god-inject, pause, interview, continue/export
+- **Cinematic rendering** — built-in post-processing for the galaxy: ACES / AgX / Neutral tone mapping, exposure, bloom, grain, vignette, chromatic aberration, anamorphic flare, four color grades; procedural nebula backdrop (fbm galactic band + dark dust) and near-field star dust; widescreen cinema mode with captions, one-click PNG export; rendering pauses off-screen and adapts resolution to frame rate
+- **"Minimal luxe" preset** — one click for the gilded grade (gold highlights, navy shadows), AgX, low bloom, faded links, shorter comet tails, quiet labels (zero-presence characters only show their tag on hover/select), breathing camera (slow FOV drift when idle), and a gold hairline frame in fullscreen; tail span and link density are also individually adjustable
+- **Warp transitions** — entering/leaving a character galaxy, switching units, and camera reset trigger radial streaks + exposure flash + FOV punch + a title card; selecting a planet gives a light pulse
+- **Numeric ledger (zero token)** — quantities spoken in the text (5,200 suits of armor, 1,200 shi of grain…) are booked automatically and injected into every agent next round; silently changing a number gets the draft killed and re-rolled, while openly disputing or correcting it is allowed and logged
+- **Normalized enforcement** — the "dense tells" kill is now length-normalized (≥10 hits, or ≥5 hits at ≥4/1000 chars); tell-list v4 adds hesitation clichés, personified silence, vague referents, syllable-by-syllable speech, blurred time, memory triggers; stats layer warns on em-dash / ellipsis addiction
+- **Day / night themes** — paper (light) and cinema (dark), or follow the system; global keyboard shortcuts, instant cast search, round-complete toasts, tab title tracks the story
 - **Local-first** — pure Python standard library, zero third-party dependencies; data and API key stay on your machine
 
 ## Install
@@ -39,6 +45,26 @@ python3 ui/serve.py
 
 **Interruptions.** Resubmit to resume from where it left off; unchanged materials are not re-billed.
 
+## UI & shortcuts
+
+Top-right: theme (◐ system / ☀ light / ☾ dark) and the shortcut sheet (?). "◈ 画质" in the galaxy corner opens the cinematic panel; all preferences persist in the browser.
+
+| Key | Action | Key | Action |
+|---|---|---|---|
+| `1`–`4` | World / Config / Run / Report | `F` | Galaxy fullscreen |
+| `C` | Cinema mode (letterbox, HUD hidden) | `Space` | Pause / resume orbit |
+| `R` | Reset camera | `U` | Switch unit system |
+| `Enter` | Dive into selected character | `⌫` | Back to cluster |
+| `G` | Cinematic panel | `S` | Export galaxy PNG |
+| `/` | Focus cast search | `T` | Cycle theme |
+| `H` | History | `Esc` | Step back out |
+
+## Input formats & API
+
+Materials are parsed with the standard library only (`GET /api/formats` lists them): plain text with encoding sniffing (UTF-8/BOM, UTF-16/32, GB18030, Big5), `.docx`, `.odt`, `.epub` (spine order), `.html`, `.rtf`, `.zip` (recursively expanded, `__MACOSX` skipped, duplicate names de-duplicated), and best-effort `.pdf` (text-based only; unreadable PDFs fail loudly with a hint). Limits: 64 MB per file, 512 MB per request; a batch with zero readable files returns 422 with the format list.
+
+`GET /api/schema` is a machine-readable endpoint index and `GET /api/health` reports version, model status, run state, and ledger sizes. Every JSON response carries `ok`/`success` and, on failure, `error`; responses include an `X-NEST-Version` header. The single source of the version is `VERSION` in `ui/serve.py`, which the release packer also reads.
+
 ## Data & privacy
 
 - Materials you feed in and the content it generates are all stored in the local directory; nothing passes through any server
@@ -52,6 +78,7 @@ ui/serve.py                     Engine core: simulation + HTTP server (REST + SS
 ui/dupian.py                    Language layer: zero-token detection of mechanical "AI tics"
 ui/test_serve.py                Integration tests (mocked LLM)
 ui/index.html                   Frontend
+ui/enhance.js / .css     UI layer: themes, cinematic post-processing, shortcuts, cast search
 ui/assets/                      Frontend build artifacts
 ui/THIRD-PARTY-LICENSES.txt     Third-party licenses for the frontend
 pack-release.py                 Release packaging, with automated privacy scan
