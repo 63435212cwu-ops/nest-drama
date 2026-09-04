@@ -8,11 +8,6 @@
 
 A unit-story creation engine: build a world for your work, then let independent characters act inside it and drive the plot — producing unit stories, unit plots and volume plots for long- and medium-form fiction, or short stories on their own. Pure Python standard library, zero third-party dependencies; your data and keys never leave your machine.
 
-<p align="center">
-  <img src="docs/demo.gif" alt="30-second demo" width="88%">
-  <br><sub>30-second demo — build a world, warp into a character's galaxy, one round written. [Full video (MP4)](docs/demo-30s.mp4)</sub>
-</p>
-
 <p>
   <img src="docs/star-cluster.png" alt="Star Cluster (3D): each unit is a solar system, characters are planets" width="49%">
   <img src="docs/character-galaxy.png" alt="Character Galaxy: dive into one character and see every round they lived" width="49%">
