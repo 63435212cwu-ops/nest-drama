@@ -77,6 +77,7 @@
     ["U", "切换单元星系"],
     ["G", "画质面板 开 / 关"],
     ["S", "导出星丛 PNG 截图"],
+    ["V", "录制 30 秒演示片（WebM）"],
     ["/", "聚焦卡司检索"],
     ["T", "日 / 夜 / 跟随系统 主题"],
     ["H", "历史局"],
@@ -375,8 +376,9 @@
     p.appendChild(tgs);
     var acts = el("div", "acts");
     var b1 = el("button", null, "📷 导出 PNG"); b1.type = "button"; b1.addEventListener("click", shot);
+    var b3 = el("button", "wide", "🎬 录制 30 秒演示片（WebM）"); b3.type = "button"; b3.addEventListener("click", startDemo);
     var b2 = el("button", null, "↺ 恢复默认"); b2.type = "button"; b2.addEventListener("click", function () { var keep = fx.panel; fx = Object.assign({}, FX_DEFAULT, { panel: keep }); applyFx(); saveFx(); toast("画质已恢复默认"); });
-    acts.appendChild(b1); acts.appendChild(b2);
+    acts.appendChild(b1); acts.appendChild(b2); acts.appendChild(b3);
     p.appendChild(acts);
     p.appendChild(el("div", "foot", "离屏与后台自动暂停渲染 · 帧率不足时自动降采样"));
     var cap = el("div", "nd-caption", "<small></small><span></span>");
@@ -490,6 +492,111 @@
     inst.select = function (n) { warp(null, null, 0.22); return se.apply(inst, arguments); };
   }
 
+
+  /* ---------------- 演示录制：30 秒宣传片（?nddemo=1 自动开跑，或面板按钮） ----------------
+   * 把 WebGL 画面逐帧合成到 1920×1080 的 2D 画布上（宽银幕黑边、字幕、标题卡、片尾），
+   * 用 MediaRecorder 录成 WebM 下载。镜头编排：星丛全景 → 推近 → 选中角色 → 跃迁进角色星系 → 返回 → 片尾。 */
+  var DEMO = { W: 1920, H: 1080, dur: 30, bar: 0.075 };
+  var DEMO_SCENES = [
+    { t: 0,   title: ["NEST-DRAMA", "让角色自己演戏 · 本地运行 · 零依赖"] },
+    { t: 4,   cap: ["01 · 投入材料，建一个世界", "世界观 · 人物 · 大纲，纯文本即可"] },
+    { t: 9,   cap: ["02 · 每个角色都是独立模拟体", "只知道他该知道的，怕他该怕的，说他自己的话"] },
+    { t: 14,  cap: ["03 · 跃迁，进入角色的星系", "每一颗星，是他亲自走过的一轮"] },
+    { t: 20,  cap: ["04 · 一轮成稿", "零 token 机检 + 监修官，把 AI 腔挡在门外"] },
+    { t: 26,  end: ["github.com/63435212cwu-ops/nest-drama", "AGPL-3.0 · Python 3.9+ · 一条命令运行"] }
+  ];
+  var demo = null;   // {t0, cv, ctx, rec, chunks, done:[], saved fx}
+  function demoText(ctx, txt, x, y, size, weight, color, spacing, align) {
+    ctx.save(); ctx.font = weight + " " + size + "px " + getComputedStyle(document.body).fontFamily;
+    ctx.fillStyle = color; ctx.textAlign = align || "center"; ctx.textBaseline = "middle";
+    if (spacing && "letterSpacing" in ctx) ctx.letterSpacing = spacing + "px";
+    ctx.shadowColor = "rgba(0,0,0,.85)"; ctx.shadowBlur = 18; ctx.fillText(txt, x, y); ctx.restore();
+  }
+  function demoFrame(inst) {
+    var d = demo; if (!d) return;
+    var t = (performance.now() - d.t0) / 1000, ctx = d.ctx, W = DEMO.W, H = DEMO.H, src = inst.renderer.domElement;
+    // 底：WebGL 画面 cover 填满
+    var sw = src.width, sh = src.height, s = Math.max(W / sw, H / sh), dw = sw * s, dh = sh * s;
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
+    ctx.drawImage(src, (W - dw) / 2, (H - dh) / 2, dw, dh);
+    // 宽银幕黑边 + 金色发丝
+    var bar = H * DEMO.bar; ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, bar); ctx.fillRect(0, H - bar, W, bar);
+    var g = ctx.createLinearGradient(0, 0, W, 0); g.addColorStop(0, "rgba(255,217,160,0)"); g.addColorStop(.5, "rgba(255,217,160,.55)"); g.addColorStop(1, "rgba(255,217,160,0)");
+    ctx.fillStyle = g; ctx.fillRect(0, bar, W, 1); ctx.fillRect(0, H - bar - 1, W, 1);
+    // 进度发丝
+    ctx.fillStyle = "rgba(255,217,160,.8)"; ctx.fillRect(0, H - bar - 3, W * Math.min(1, t / DEMO.dur), 2);
+    // 当前场景
+    var sc = null; for (var i = 0; i < DEMO_SCENES.length; i++) if (t >= DEMO_SCENES[i].t) sc = DEMO_SCENES[i];
+    if (!sc) return;
+    var next = DEMO_SCENES[DEMO_SCENES.indexOf(sc) + 1], tEnd = next ? next.t : DEMO.dur, lt = t - sc.t, span = tEnd - sc.t;
+    var a = Math.min(1, lt / .8) * Math.min(1, Math.max(0, (tEnd - t) / .6));       // 入 0.8s / 出 0.6s
+    if (sc.title) {
+      ctx.fillStyle = "rgba(0,0,0," + (0.35 * a) + ")"; ctx.fillRect(0, 0, W, H);
+      ctx.globalAlpha = a;
+      demoText(ctx, sc.title[0], W / 2, H / 2 - 30, 96, "850", "#fff", 22);
+      demoText(ctx, sc.title[1], W / 2, H / 2 + 60, 24, "600", "#ffd9a0", 8);
+      var lw = 520 * Math.min(1, lt / 1.2); ctx.fillStyle = "rgba(255,217,160,.8)"; ctx.fillRect(W / 2 - lw / 2, H / 2 + 105, lw, 1);
+      ctx.globalAlpha = 1;
+    } else if (sc.cap) {
+      ctx.globalAlpha = a;
+      var y0 = H - bar - 96, rise = (1 - Math.min(1, lt / .8)) * 14;
+      ctx.fillStyle = "rgba(255,217,160,.9)"; ctx.fillRect(96, y0 - 22 + rise, 3, 68);
+      demoText(ctx, sc.cap[0], 118, y0 + rise, 40, "800", "#fff", 2, "left");
+      demoText(ctx, sc.cap[1], 118, y0 + 44 + rise, 20, "500", "rgba(255,255,255,.78)", 1, "left");
+      ctx.globalAlpha = 1;
+    } else if (sc.end) {
+      ctx.fillStyle = "rgba(0,0,0," + (0.55 * Math.min(1, lt / 1.2)) + ")"; ctx.fillRect(0, 0, W, H);
+      ctx.globalAlpha = Math.min(1, lt / 1.0);
+      demoText(ctx, "NEST-DRAMA", W / 2, H / 2 - 70, 64, "850", "#fff", 18);
+      demoText(ctx, sc.end[0], W / 2, H / 2 + 10, 30, "700", "#ffd9a0", 3);
+      demoText(ctx, sc.end[1], W / 2, H / 2 + 58, 20, "500", "rgba(255,255,255,.72)", 4);
+      ctx.globalAlpha = 1;
+    }
+    // 编排动作（一次性）
+    DEMO_ACTIONS.forEach(function (ac, i) { if (!d.done[i] && t >= ac.t) { d.done[i] = true; try { ac.run(inst); } catch (e) { console.warn("demo action", e); } } });
+    if (t >= DEMO.dur + 0.4) stopDemo();
+  }
+  var DEMO_ACTIONS = [
+    { t: 0.2, run: function (inst) { inst.drift = true; inst.reset(); } },
+    { t: 4.0, run: function (inst) { var V = inst.camera.position.constructor; inst.flyTo(new V(60, 70, 250), new V(0, 0, 0)); } },
+    { t: 9.0, run: function (inst) { var p = demoStar(inst); if (p) inst.select(p); } },
+    { t: 14.0, run: function (inst) { var p = demoStar(inst); if (p) inst.enterDive(p.id); } },
+    { t: 17.5, run: function (inst) { var V = inst.camera.position.constructor; inst.flyTo(new V(-40, 90, 240), new V(0, 0, 0)); } },
+    { t: 25.4, run: function (inst) { inst.exitDive(); } }
+  ];
+  function demoStar(inst) {
+    var cs = (inst.planets || []).filter(function (p) { return p.kind !== "round" && !p.ghost && p.c; });
+    cs.sort(function (a, b) { return (b.c.present || 0) + (b.c.drives || 0) * 2 - (a.c.present || 0) - (a.c.drives || 0) * 2; });
+    return cs[0] || null;
+  }
+  function startDemo() {
+    var inst = g3; if (!inst || demo) return;
+    if (!window.MediaRecorder || !HTMLCanvasElement.prototype.captureStream) { toast("此浏览器不支持录制（需要 Chrome / Edge）"); return; }
+    var saved = Object.assign({}, fx);
+    fx = Object.assign({}, FX_DEFAULT, PRESET_LUXE, { panel: false, cinema: false, warp: true, speed: 0.26 }); applyFx();
+    if (!inst.full) inst.toggleFull();
+    var cv = document.createElement("canvas"); cv.width = DEMO.W; cv.height = DEMO.H;
+    var ctx = cv.getContext("2d"), stream = cv.captureStream(30);
+    var mime = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"].filter(function (m) { return MediaRecorder.isTypeSupported(m); })[0];
+    var rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 9000000 }), chunks = [];
+    rec.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
+    rec.onstop = function () {
+      var b = new Blob(chunks, { type: "video/webm" }), a = document.createElement("a");
+      a.href = URL.createObjectURL(b); a.download = "nest-drama-demo-30s.webm"; a.click();
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
+      // 同时回传本地服务：自动化浏览器常拦下载，落盘到 ui/exports/ 才拿得到文件
+      fetch("/api/demo-save", { method: "POST", headers: { "Content-Type": "application/octet-stream", "X-Demo-Name": "nest-drama-demo-30s.webm" }, body: b })
+        .then(function (r) { return r.json(); })
+        .then(function (j) { toast("演示已导出 · " + Math.round(b.size / 1048576) + " MB → ui/exports/", 5000); })
+        .catch(function () { toast("演示已导出（浏览器下载）· " + Math.round(b.size / 1048576) + " MB", 5000); });
+      fx = saved; applyFx();
+    };
+    demo = { t0: performance.now(), cv: cv, ctx: ctx, rec: rec, chunks: chunks, done: [] };
+    rec.start(500);
+    toast("开始录制 30 秒演示…请勿操作", 3000);
+  }
+  function stopDemo() { var d = demo; if (!d) return; demo = null; try { d.rec.stop(); } catch (e) { /* 已停 */ } }
+
   function hookRender(inst) {
     var comp = inst.composer; if (!comp || comp.__nd) return;
     comp.__nd = true;
@@ -500,6 +607,7 @@
       tickFx(step);
       if (!visible && !inst.full) return;         // 离屏：只推进物理，不出图
       orig(dt);
+      if (demo) demoFrame(inst);
       frames++;
       var now = performance.now();
       if (now - fpsT >= 1000) { fps = Math.round(frames * 1000 / (now - fpsT)); frames = 0; fpsT = now; }
@@ -527,6 +635,7 @@
     var inst = window.__ND3D; if (!inst || inst.__ndAttached) return;
     inst.__ndAttached = true; g3 = inst;
     upgradePost(inst); hookRender(inst); buildPanel(inst); buildDeepSpace(inst); hookJumps(inst); applyFx();
+    if (/[?&]nddemo=1/.test(location.search) && !inst.__ndDemoAuto) { inst.__ndDemoAuto = true; setTimeout(startDemo, 2500); }
     // 星系重建（切单元/进出角色星系）后重新套用名牌、轨迹、连线开关
     var build = inst.buildSystem;
     inst.buildSystem = function () {
@@ -565,6 +674,7 @@
     if (k === "u" || k === "U") { inst.switchUnit && inst.switchUnit(); return; }
     if (k === "g" || k === "G") { fx.panel = !fx.panel; applyFx(); saveFx(); return; }
     if (k === "s" || k === "S") { shot(); return; }
+    if (k === "v" || k === "V") { startDemo(); return; }
     if (k === "c" || k === "C") { fx.cinema = !fx.cinema; applyFx(); saveFx(); toast(fx.cinema ? "影院模式 · 移动鼠标显示按钮，C 退出" : "已退出影院模式"); return; }
   }, true);
 

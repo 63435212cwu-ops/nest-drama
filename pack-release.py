@@ -48,6 +48,7 @@ ENGINE_FILES = [                                   # 发布白名单：引擎本
     "SECURITY.md",
     "CODE_OF_CONDUCT.md",
     "README_CN.md",                                # 中文版门面：中文用户入口（默认英文在 README.md）
+    "docs/demo.gif",                               # README 顶部演示动图
     "docs/star-cluster.png",                       # README 介绍图：主星丛
     "docs/character-galaxy.png",                   # README 介绍图：角色星系
     "LICENSE",                                     # AGPL-3.0：分发必须随附协议全文

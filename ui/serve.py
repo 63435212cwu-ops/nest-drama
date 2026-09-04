@@ -5184,6 +5184,14 @@ class Handler(SimpleHTTPRequestHandler):
             if n > MAX_BODY_BYTES:
                 return self._json(413, {"error": "请求体超过 %d MB 上限，请分批投放材料" % (MAX_BODY_BYTES // 1024 // 1024)})
             raw = self.rfile.read(n) if n else b""
+            if u.path == "/api/demo-save":
+                # 演示片回传：浏览器录完 WebM 直接 POST 原始字节，落到 ui/exports/（本地服务，仅 127.0.0.1）
+                fn = re.sub(r"[^A-Za-z0-9._-]", "_", (self.headers.get("X-Demo-Name") or "nest-drama-demo.webm"))[:80]
+                d = os.path.join(UI_DIR, "exports"); os.makedirs(d, exist_ok=True)
+                fp = os.path.join(d, fn)
+                with open(fp, "wb") as f:
+                    f.write(raw)
+                return self._json(200, {"ok": True, "path": fp, "bytes": len(raw)})
             if ctype.startswith("multipart/form-data"):
                 body = _parse_multipart(raw, ctype)          # (files, fields)
             else:

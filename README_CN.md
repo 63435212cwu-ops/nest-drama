@@ -8,6 +8,11 @@
 
 单元剧情创作引擎：先为作品建立一个世界，再让独立角色在世界内自主行动、推动剧情，产出单元故事、单元剧情与卷集剧情——辅助长篇、中篇创作，也可直接写短篇。纯 Python 标准库，零第三方依赖，数据与密钥只留在本机。
 
+<p align="center">
+  <img src="docs/demo.gif" alt="30 秒演示" width="88%">
+  <br><sub>30 秒演示——建世界、跃迁进角色星系、一轮成稿。[完整视频（MP4）](docs/demo-30s.mp4)</sub>
+</p>
+
 <p>
   <img src="docs/star-cluster.png" alt="星丛（3D）：一个单元即一个恒星系，角色是行星" width="49%">
   <img src="docs/character-galaxy.png" alt="角色星系：潜入单个角色，看他走过的每一轮" width="49%">
