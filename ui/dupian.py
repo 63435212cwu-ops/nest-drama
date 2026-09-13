@@ -493,7 +493,11 @@ def cn2int(s):
 
 # 数量词：阿拉伯或中文数字 + 单位；单位表偏古今通用（军务/钱粮/人马/时日/度量）
 _UNITS = ("领|石|斛|斗|升|两|贯|钱|文|铢|匹|骑|人|口|户|名|员|艘|辆|乘|车|船|里|丈|尺|步|亩|顷|"
-          "日|天|夜|月|年|岁|载|更|时辰|刻|个月|万|千|百|担|箩|袋|桶|坛|斤|块|枚|把|张|封|道|条|座|间|万人|千人")
+          "日|天|夜|月|年|岁|载|更|时辰|刻|个月|万|千|百|担|箩|袋|桶|坛|斤|块|枚|把|张|封|道|条|座|间|万人|千人|"
+          "个|位|份|页|具|支|套|双")           # 「三十七个名字」这类账目戏最常见的量词，旧表漏了「个」
+# 约数（一两天/两三个/三五人）与修辞性巨数（三万里/万年）不是数目事实
+_APPROX = {"一两", "两三", "三两", "三五", "三四", "四五", "五六", "六七", "七八", "八九", "一二", "十几", "几十"}
+_HYPERBOLE_UNITS = ("里", "步", "丈", "尺", "年", "载", "岁", "日", "天", "夜")
 _NUM = r"(\d[\d,]*(?:\.\d+)?|[一二两三四五六七八九十百千万零〇]{1,8})"
 NUMFACT = re.compile(r"([\u4e00-\u9fff]{0,6}?)(?<![一二两三四五六七八九十百千万零〇\d])" + _NUM + r"\s*(" + _UNITS + r")(?![\u4e00-\u9fff]{0,1}(前|后|之内|以内|上下|左右|开外|多|余))")
 _NUM_NOUN_STOP = set("第共有约计到了是把将给拿凑欠差少多剩还这那其中约莫大概大约不止足足整整只才却便就也又再")
@@ -529,9 +533,20 @@ def num_facts(text, speaker=""):
         pre, numtxt, unit = m.group(1), m.group(2), m.group(3)
         if unit in ("万", "千", "百") and not re.search(r"\d", numtxt):
             continue                                    # 「三万」单独成量词时通常是模糊修辞（三万里路云和月）
+        if pre.endswith(("第", "初", "头")):
+            continue                                    # 「第三天」「初一」是序数/日期，不是数量账
+        if numtxt in _APPROX:
+            continue                                    # 「一两天」「两三个」是约数
+        if numtxt.endswith(("万", "亿")) and not re.search(r"\d", numtxt) and unit in _HYPERBOLE_UNITS:
+            continue                                    # 「三万里」「万年」是修辞，不是路程/年数
         q = cn2int(numtxt)
         if q is None or q == 0 or (isinstance(q, int) and q > 10 ** 9):
             continue
+        after = body[m.end():m.end() + 1]
+        if unit in ("人", "名", "口", "个") and isinstance(q, int) and q <= 3:
+            continue                                    # 「两人对视」「一人走了」是叙事人称，不入账；三人以内不算数目事实
+        if unit == "两" and after in "天日个次年月":
+            continue                                    # 「一两天」「三两个」的「两」是约数，不是重量
         if unit in ("个月",):
             unit = "月"
         sent = _sent_of(body, m.start())

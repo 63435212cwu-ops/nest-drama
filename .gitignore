@@ -6,6 +6,8 @@ ui/build-failed.json
 ui/usage.json
 ui/局史.json
 ui/api-config.json
+ui/gravity.json
+ui/*.tmp
 指令队列.json
 
 # ── 库数据（用户创作内容，绝不入库不入包）──

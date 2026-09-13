@@ -8,7 +8,7 @@
 用法:  python3 serve.py [端口]        # 在 群像/ui/ 内运行；默认端口 8787
 接口:  GET  /            静态文件（ui/ 目录）
        GET  /events      SSE —— data.json / 指令队列.json 变化时推 update
-       GET  /queue       当前指令队列 JSON
+       GET  /api/health  版本与运行态（完整端点清单见 GET /api/schema）
        POST /cmd         {type, payload} 指令（api 模式直通执行，无 API 时入队待自动执行）
 后台:  队列消费器（api 模式每 5 秒消费待处理指令：init/beat/pause/interview/report/gravity/continue-story）
        启动时若有待建世界（pending-init）且 LLM 可用 → 自动开建
@@ -33,7 +33,7 @@ from socketserver import ThreadingMixIn
 
 UI_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(UI_DIR)                      # 群像/
-VERSION = "1.1.0"                                        # 发布包/health/响应头共用（pack-release.py 从此处读取）
+VERSION = "1.2.0"                                        # 发布包/health/响应头共用（pack-release.py 从此处读取）
 STARTED_AT = time.time()
 sys.path.insert(0, UI_DIR)
 try:                                                    # 毒编机检（零 token 语言层）
@@ -498,25 +498,67 @@ def _prune(q):
     return q
 
 
+_ATOMIC_SEQ = [0]
+_DATA_LOCK = threading.RLock()                       # data.json 的写序列化：推演线程、访谈线程、导出、注入都会写它
+
+
 def _atomic_json_dump(obj, path):
-    """原子落盘：写 .tmp → os.replace。进程中断不再留下半截 JSON。"""
-    tmp = path + ".tmp"
+    """原子落盘：写唯一临时文件 → os.replace。进程中断不再留下半截 JSON。
+
+    临时文件名必须唯一：旧版固定 path+'.tmp'，两个线程同时落盘时甲会把乙写了一半的
+    .tmp 改名成正式文件（半截 JSON 上位），乙随后 os.replace 找不到文件抛错——
+    推演线程与访谈/导出线程并发时真实可复现。"""
+    _ATOMIC_SEQ[0] += 1
+    tmp = "%s.%d.%d.%d.tmp" % (path, os.getpid(), threading.get_ident() % 100000, _ATOMIC_SEQ[0])
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=1)
     os.replace(tmp, path)
 
 
 def _save_data(D):
-    """data.json 原子写 + 单份 .bak 轮转。旧版直接覆盖：写一半断电即整份损坏且无备份。"""
-    try:
-        if os.path.exists(DATA_PATH):
-            bak = DATA_PATH + ".bak"
-            if os.path.exists(bak):
-                os.remove(bak)
-            os.replace(DATA_PATH, bak)
-    except OSError:
-        pass
-    _atomic_json_dump(D, DATA_PATH)
+    """data.json 原子写 + 单份 .bak 轮转，全程持锁。
+
+    .bak 用复制而不是改名：旧版先把 data.json 改名成 .bak 再写新文件，中间几毫秒
+    data.json 不存在——此时读到的 _load_data() 是 None，推演线程会误报「尚未建世界」，
+    前端会闪一下"未建局"。"""
+    import shutil
+    with _DATA_LOCK:
+        try:
+            if os.path.exists(DATA_PATH):
+                shutil.copy2(DATA_PATH, DATA_PATH + ".bak")
+        except OSError:
+            pass
+        _atomic_json_dump(D, DATA_PATH)
+
+
+def _mutate_data(fn):
+    """读-改-写原子化：持锁重读最新 data.json → fn(D) 就地改 → 落盘。返回 D（无库返回 None）。
+
+    凡是"只想改一小块"的写路径（访谈答案、注入、轮耗时、导出清单、图灵复测）都必须走这里，
+    不能拿几十秒前 load 的旧 D 直接 _save_data——推演线程刚落盘的一整轮会被旧副本盖掉
+    （轮号倒退 → 下一轮覆盖同名轮文件、纪事重复一段）。"""
+    with _DATA_LOCK:
+        D = _load_data()
+        if D is None:
+            return None
+        fn(D)
+        _save_data(D)
+        return D
+
+
+def _save_data_merge(D, keep=("interviews", "reports", "exports"), meta_keep=("config", "gravityInject")):
+    """长事务（一整轮推演，持有 D 几分钟）的落盘：以 D 为准，但把这期间别的线程写进磁盘的
+    「旁路字段」合并回来，不让轮末的一次 _save_data 把访谈答案/导出清单/新注入整块抹掉。"""
+    with _DATA_LOCK:
+        cur = _load_data() or {}
+        for k in keep:
+            if k in cur:
+                D[k] = cur[k]
+        cm, dm = cur.get("meta") or {}, D.setdefault("meta", {})
+        for k in meta_keep:
+            if k in cm:
+                dm[k] = cm[k]
+        _save_data(D)
 
 
 def _enqueue(type_, payload):
@@ -1096,17 +1138,18 @@ def _compile_report():
     txt = "\n".join(out)
     open(os.path.join(ROOT_DIR, "导出", name), "w", encoding="utf-8").write(txt)
     open(os.path.join(UI_DIR, "exports", name), "w", encoding="utf-8").write(txt)
-    D.setdefault("exports", [])
-    D["exports"] = [e for e in D["exports"] if e.get("name") != name]
     # 缺轮如实告知：feed 记了 N 轮但磁盘只剩 M 个轮文件时，不许拿 M 轮冒充"全录"
     fed = len(D.get("feed") or [])
     miss = max(0, fed - len(rounds))
-    D["exports"].insert(0, {"name": name, "path": "exports/" + name, "rounds": len(rounds), "missing": miss,
-                            "at": "%d 轮" % len(rounds),
-                            "note": ("全部轮次叠加 · 行为/对话/心理/故事讲解" if not miss
-                                     else "注意：纪事记有 %d 轮，磁盘只剩 %d 个轮文件，缺的 %d 轮无法收录"
-                                          % (fed, len(rounds), miss))})
-    json.dump(D, open(os.path.join(UI_DIR, "data.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    entry = {"name": name, "path": "exports/" + name, "rounds": len(rounds), "missing": miss,
+             "at": "%d 轮" % len(rounds),
+             "note": ("全部轮次叠加 · 行为/对话/心理/故事讲解" if not miss
+                      else "注意：纪事记有 %d 轮，磁盘只剩 %d 个轮文件，缺的 %d 轮无法收录"
+                           % (fed, len(rounds), miss))}
+
+    def _put(d):                                     # 只改导出清单；旧版整份 json.dump 非原子且会盖掉并发落的一轮
+        d["exports"] = [entry] + [e for e in (d.get("exports") or []) if e.get("name") != name]
+    _mutate_data(_put)
     return name, None
 
 # ══════════ 自动驾驶（独立 API 模式）：每角色一个独立 agent + 双专家两道审 ══════════
@@ -1379,7 +1422,8 @@ def _clip_boundary(value, limit=500, prefer=":。！？\n"):
         pos = marks[-1] + 1
         if pos >= max(20, int(limit * 0.55)):
             return cut[:pos].rstrip()
-    return cut.rstrip("，,、；;:：-— ") + "……"
+    # 无句界：硬截后补省略号，总长仍不超过 limit（旧版 +2 字，"≤ 上限"的承诺差两个字）
+    return s[:max(1, limit - 2)].rstrip("，,、；;:：-— ") + "……"
 
 
 def _section_body(text, title):
@@ -1418,9 +1462,13 @@ def _unit_blueprint(D, U):
     cast_sec = _section_body(body, "卡司")
     if cast_sec:
         for line in cast_sec.splitlines():
+            if not line.strip():
+                continue
             if "暗线" in line:
                 dark.extend(_split_names(line.split("：", 1)[-1] if "：" in line else line))
-            elif "在场" in line or "卡司" in line:
+            elif "在场" in line or "卡司" in line or "：" not in line:
+                # 续演单元的卡司节是一行裸名字（甲、乙）——旧版只认带「在场：」标签的行，
+                # 裸行被跳过后回退成"正文里出现过的名字都在场"，前情提要一提就把全员拉进两人戏
                 cast.extend(_split_names(line.split("：", 1)[-1] if "：" in line else line))
     known = [c.get("name") for c in D.get("cast", []) if c.get("name")]
     explicit = [n for n in cast if n in known]
@@ -1437,8 +1485,11 @@ def _unit_blueprint(D, U):
         scene_sec = _section_body(body, "场景清单") or _section_body(body, "舞台")
         for line in scene_sec.splitlines():
             s = re.sub(r"^[-*·\d.、\s]+", "", line).strip()
-            if any(k in line for k in ("地点", "场景", "空间", "；", ";")) and s:
-                vals = re.split(r"[：:；;、]+", s, maxsplit=1)
+            # 只认明确标了地点/场景的行。旧版连含分号的行都当场景表，
+            # 「舞台」节的氛围散文（"深冬；雪夜；压抑"）被切成碎片当场地，
+            # 然后被场记当成「本轮物理场地：压抑」发给全员。
+            if any(k in line for k in ("地点", "场景")) and s:
+                vals = re.split(r"[：:]+", s, maxsplit=1)
                 scenes.extend(_split_names(vals[-1]))
     for line in body.splitlines():
         if re.search(r"(?:地点|场景)\s*[：:]", line):
@@ -1499,7 +1550,9 @@ _MOVEMENT = {
     "达成": "resolved", "解决": "resolved", "resolved": "resolved", "done": "resolved",
     "受挫": "setback", "退步": "setback", "setback": "setback",
     "悬置": "held", "停滞": "held", "未动": "held", "held": "held", "none": "held",
-    "移交": "deferred", "挂起": "deferred", "deferred": "deferred"
+    # 裁判提示词里给的枚举是「搁置」——旧表漏了它，落到空串后按"非平轮即推进"回退，
+    # 一条明明被搁置的线被记成 +18 进度（伪造推进正是账目最不能犯的错）
+    "搁置": "deferred", "移交": "deferred", "挂起": "deferred", "deferred": "deferred"
 }
 
 
@@ -1642,17 +1695,23 @@ def _resolve_plot_thread(entry, requested="", text=""):
     txt = str(text or "")
     scored = []
     for t in threads:
-        terms = re.findall(r"[\u4e00-\u9fff]{2,}", t.get("label", ""))
-        score = sum(1 for token in terms if token in txt)
-        if score:
-            scored.append((score, t))
-    return max(scored, key=lambda x: x[0])[1] if scored else None
+        # \u6309\u4e8c\u5b57\u8bcd\u91cd\u53e0\u8ba1\u5206\u3002\u65e7\u7248\u628a label \u5207\u6210\u300c\u8fde\u7eed\u6c49\u5b57\u4e32\u300d\u2014\u2014\u4e2d\u6587 label \u6ca1\u6709\u5206\u9694\u7b26\uff0c
+        # \u6574\u6761 label \u662f\u4e00\u4e2a token\uff0c\u7b49\u4e8e\u8981\u6c42\u8bc1\u636e\u91cc\u9010\u5b57\u542b\u6574\u6761 label\uff0c\u5173\u952e\u8bcd\u5339\u914d\u4ece\u6765\u6ca1\u751f\u6548\u8fc7\u3002
+        label = str(t.get("label", ""))
+        grams = {label[i:i + 2] for i in range(len(label) - 1)
+                 if re.fullmatch(r"[\u4e00-\u9fff]{2}", label[i:i + 2])}
+        if not grams:
+            continue
+        score = sum(1 for g in grams if g in txt)
+        if score >= max(2, int(len(grams) * 0.3)):          # \u81f3\u5c11\u4e24\u4e2a\u4e8c\u5b57\u8bcd\u3001\u4e14\u8986\u76d6 label \u4e09\u6210\uff0c\u9632\u5076\u5408
+            scored.append((score / len(grams), score, t))
+    return max(scored, key=lambda x: (x[0], x[1]))[2] if scored else None
 
 
 def _loop_snapshot(D, U):
     """识别可疑不动点：一次重复不处理，连续同对手/平轮才产生循环债。"""
     meta = D.get("meta", {})
-    feed = [f for f in (D.get("feed") or []) if f.get("unit") in ("", U.get("name"))]
+    feed = [f for f in (D.get("feed") or []) if isinstance(f, dict) and f.get("unit") in ("", None, U.get("name"))]
     recent = feed[-4:]
     pairs = [(f.get("driver", ""), f.get("target", ""), bool(f.get("flat"))) for f in recent]
     same_pair = 0
@@ -1837,8 +1896,14 @@ def _update_plot_ledger(D, U, R, plan, rnd, flat, scene=""):
     gp = str(R.get("goal_progress") or "")
     if goal:
         gm = "resolved" if gp == "达成" else "advanced" if gp in ("推进", "临门") and not flat else "held"
-        apply(goal, gm, _clip_boundary(R.get("goal_reason") or evidence, 220),
-              cost if gm != "held" else "", trigger)
+        if goal is focus or goal.get("id") == (focus or {}).get("id"):
+            # 焦点就是主线目标线程：只按 goal_progress 补「达成」，不再结算第二遍进度
+            # （旧版 apply 两次：一轮推进记成 +36）
+            if gm == "resolved" and goal.get("status") != "resolved":
+                apply(goal, "resolved", _clip_boundary(R.get("goal_reason") or evidence, 220), cost, trigger)
+        else:
+            apply(goal, gm, _clip_boundary(R.get("goal_reason") or evidence, 220),
+                  cost if gm != "held" else "", trigger)
 
     updates = R.get("subplot_updates") or R.get("thread_updates") or []
     if isinstance(updates, list):
@@ -1918,7 +1983,7 @@ def _psyche_rewrite(name, rnd, mind, plan_hint, state=""):
         t = _re.sub(r"emo: .*", "emo: " + emo.strip(), t, count=1)
         t = _re.sub(r"tier: .*", "tier: " + tier.strip(), t, count=1)
     if mind:
-        body = mind.strip()[:240]
+        body = _clip_boundary(mind, 240)                 # 停在句界，不把心象截成半句
         if _re.search(r"##\s*(?:他|她)?此刻", t):
             t = _re.sub(r"(##\s*(?:他|她)?此刻[^\n]*\n)(.*?)(?=\n##|\Z)",
                         lambda m: m.group(1) + "\n" + body + "\n", t, count=1, flags=_re.S)
@@ -1971,6 +2036,65 @@ def _lore_ctx(D, trig_text):
 # 改白名单之后，以后再加【闪念】【身体】【今天早上】任何内心字段，默认都是私密的，漏不出去。
 _PUBLIC_FIELDS = ("行为", "对话", "说", "公开", "反应")
 
+# 出场过滤：只认"已经发生"的措辞（已死/身故/被收押/死者…），不认裸词——
+# 「负责收押的狱卒」「验尸的法医」是活人，且往往是主笔。
+_DEAD_PAT = re.compile(r"已死|已殁|已故|身故|身亡|殁于|殁|(?:被|已|遭)收押|收押中|在押|死者|亡者|亡故")
+
+
+def _unit_index(D, name):
+    """单元名 → units[] 序号（图谱按 unitIndex 换色）；找不到给 0。"""
+    for i, u in enumerate(D.get("units") or []):
+        if isinstance(u, dict) and u.get("name") == name:
+            return int(u.get("colorIndex", i) if u.get("colorIndex") is not None else i)
+    return 0
+
+
+def _graph_relate(D, a, b, unit_index=0, kind="关系", weight=1):
+    """关系边 upsert（无向）：同一对人只保留一条边，重复交手累加 weight、刷新 unitIndex。
+
+    为什么要有这个函数：旧版的「关系」边是建世界时按名册顺序 a→a+1..a+3 连出来的链，
+    与材料、与剧情都无关，且整局不再变化——星丛里的连线、角色卡里的「关系」列表
+    展示的都是这条假链。现在关系边只来自两处真实来源：建世界时角色卡互相点名，
+    推演中的驱动→指向与裁判判定的旧账（scars）。"""
+    a, b = (a or "").strip(), (b or "").strip()
+    if not a or not b or a == b:
+        return None
+    g = D.setdefault("graph", {})
+    if not isinstance(g, dict):
+        D["graph"] = g = {}
+    edges = g.setdefault("edges", [])
+    if not isinstance(edges, list):
+        g["edges"] = edges = []
+    for e in edges:
+        if isinstance(e, dict) and e.get("kind") == kind and {e.get("source"), e.get("target")} == {a, b}:
+            e["weight"] = int(e.get("weight", 1) or 1) + int(weight)
+            e["unitIndex"] = int(unit_index or 0)
+            return e
+    e = {"source": a, "target": b, "kind": kind, "unitIndex": int(unit_index or 0), "weight": int(weight)}
+    edges.append(e)
+    return e
+
+
+def _init_relations(D, cast):
+    """建世界时的关系边：甲的内核/心象/秘密里点了乙的名 → 两人有关系（零 token，有原文依据）。
+    材料里谁也没提谁（极少见）才回退到旧的名册相邻链，保证图谱不是一盘散沙。"""
+    names = [c.get("name") for c in cast if isinstance(c, dict) and c.get("name")]
+    texts = {}
+    for nm in names:
+        texts[nm] = "\n".join(_strip_fm(_read(p)) for p in
+                              ("角色/%s.md" % nm, "角色/%s·心象.md" % nm, "角色/%s·声纹.md" % nm))
+    made = 0
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            if (b in texts.get(a, "")) or (a in texts.get(b, "")):
+                _graph_relate(D, a, b, 0, weight=0)
+                made += 1
+    if not made:
+        for i in range(len(names)):
+            for j in range(i + 1, min(len(names), i + 4)):
+                _graph_relate(D, names[i], names[j], 0, weight=0)
+    return made
+
 
 def _public_cut(t):
     """把一段回合/轮记录裁成'在场者看得见的部分'：只留白名单字段（行为/对话/反应等），
@@ -1979,12 +2103,22 @@ def _public_cut(t):
     if not t:
         return ""
     import re as _re
-    for marker in ("## 审核审计", "## 【结构", "## 引力检查", "## 三查"):
+    # 轮记录的段序：各人回合/反应 → 【结构·四拍】→ 审核审计 → 【纪要】→ 引力检查 → 三查与脊椎触达。
+    # 只有回合/反应与纪要是"在场者看得见的"。旧版只砍掉审核审计一段：
+    # 【结构·四拍】里的"目的：（引驱动者【目的】原意）"与接棒、引力检查里的"目标：推进/临门"、
+    # 三查里的脊椎触达，全部随公共实录发给了下一轮每个角色——角色因此知道"剧情要往哪走"。
+    cut = len(t)
+    for marker in ("## 【结构", "## 审核审计", "## 【纪要】", "## 引力检查", "## 三查"):
         i = t.find(marker)
-        if i >= 0:
-            j = t.find("## 【纪要】")
-            t = t[:i] + (t[j:] if 0 <= j and j > i else "")
-            break
+        if 0 <= i < cut:
+            cut = i
+    head = t[:cut]
+    scene = ""
+    j = t.find("## 【纪要】")
+    if j >= 0:
+        k = t.find("\n## ", j + 5)
+        scene = t[j:k if k > j else len(t)].rstrip()
+    t = head.rstrip() + ("\n\n" + scene if scene else "")
     t = _re.sub(r"^【([^】]{1,8})】.*$",
                 lambda m: m.group(0) if m.group(1) in _PUBLIC_FIELDS else "",
                 t, flags=_re.M)
@@ -2046,6 +2180,137 @@ def _field_guard(text, lg=None, name="", cap=220):
         lg.append("%s：字段越界——%d 句内心从【行为】搬回【心理】（防经由公开字段泄漏）"
                   % (name, len(moved)))
     return "\n".join(out)
+
+
+_SCENE_PUBLIC_SECS = ("舞台", "开场态", "开场", "卡司", "前情提要", "时间", "地点", "场景", "氛围")
+_SCENE_DIRECTOR_SECS = ("单元目标", "目标", "单元约束", "约束", "轮次预算", "预算", "细纲", "单元小结", "新增角色", "必须", "禁止")
+
+
+def _scene_ctx(U, limit=2400):
+    """角色可见的「此刻的场」：只给舞台/开场态/卡司/前情提要这类**已经在世界里的事实**。
+
+    旧版把整份单元剧本 U["body"] 发给每个角色：里面有「单元目标」（这段戏要走到的结果）、
+    「必须发生」「禁止」「轮次预算」，续演单元还有作者写的「细纲」。角色拿着导演的分镜表演戏，
+    "剧情节点靠世界内因果自然达成"就成了空话——他知道终点在哪，自然会往那儿走。
+    这里按小节白名单裁：目标/约束/预算/细纲一律不进角色信封（场记、裁判照旧能看到 U 本体）。"""
+    body = (U or {}).get("body", "") or ""
+    if not body.strip():
+        return ""
+    parts = re.split(r"(?m)^(?=##\s)", body)
+    head = parts[0] if parts and not parts[0].startswith("##") else ""
+    keep = []
+    matched = False
+    for sec in parts:
+        if not sec.startswith("##"):
+            continue
+        title = re.split(r"[（(：:]", sec.splitlines()[0].lstrip("#").strip())[0]   # 只看标题主词，括号里的说明不算
+        if any(k in title for k in _SCENE_DIRECTOR_SECS):
+            continue
+        if any(k in title for k in _SCENE_PUBLIC_SECS):
+            matched = True
+            if "卡司" in title:                              # 「暗线：丙」是导演标注（谁是暗线人物），角色不该知道
+                sec = "\n".join(ln for ln in sec.splitlines() if "暗线" not in ln)
+            keep.append(sec.strip())
+    if not matched:
+        # 未知格式的剧本：保守裁——逐行剔掉带导演口径的行，其余当场面
+        lines = [ln for ln in body.splitlines()
+                 if not re.search(r"目标|必须|禁止|最多\s*\d+\s*轮|预算|细纲", ln)]
+        return _clip_boundary("\n".join(lines).strip(), limit)
+    head_lines = [ln for ln in head.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    out = ("\n".join(head_lines) + "\n\n" if head_lines else "") + "\n\n".join(keep)
+    return _clip_boundary(out.strip(), limit)
+
+
+def _psyche_ctx(psy, limit=2200):
+    """心象进信封的裁法：旧账/此刻/打算三节必进，其余按原序补到上限。
+
+    心象文件是「正文 + ## 此刻 + ## 打算 + ## 旧账（只增不删，追加在末尾）」，
+    旧版直接 psy[:2200]：心象一长，追加在末尾的旧账整节被截掉——角色背着的所有过去
+    根本没进他脑子，"吵完架下一轮复位成一条好汉"的老病从另一个口子回来了。"""
+    t = (psy or "").strip()
+    if len(t) <= limit:
+        return t
+    parts = re.split(r"(?m)^(?=##\s)", t)
+    head, secs = (parts[0], parts[1:]) if parts and not parts[0].startswith("##") else ("", parts)
+
+    def _rank(s):
+        h = s.splitlines()[0]
+        return 0 if "旧账" in h else 1 if "此刻" in h else 2 if "打算" in h else 3
+    chosen, budget = set(), limit
+    trimmed = list(secs)
+    for i in sorted(range(len(secs)), key=lambda k: (_rank(secs[k]), k)):
+        s = secs[i].strip()
+        lines = s.splitlines()
+        if _rank(s) == 0 and len(lines) > 9:                 # 旧账只带最近 8 条：最新的疤最要紧
+            s = "\n".join([lines[0]] + lines[-8:])
+        if len(s) > budget:
+            if budget < 120:
+                continue
+            s = _clip_boundary(s, budget)
+        trimmed[i] = s
+        chosen.add(i)
+        budget -= len(s) + 2
+        if budget <= 60:
+            break
+    out = []
+    if head.strip() and budget > 80:
+        out.append(_clip_boundary(head.strip(), budget))
+    out += [trimmed[i] for i in range(len(secs)) if i in chosen]
+    return "\n\n".join(out)
+
+
+def _memory_ctx(D, name, unit, limit=900, n=6):
+    """该角色亲历过的前几轮纪要（只取他在场的轮次）——公共记忆的视野律版本。
+
+    旧版角色只看得见「上一轮」的公共实录，三轮前当众发生的事只剩心象里 240 字的回写；
+    纪要是裁判写的客观镜头，但只给他在场的那几轮：他没在的场，他就不知道。"""
+    rows = []
+    for f in (D.get("feed") or []):
+        if not isinstance(f, dict) or f.get("unit") not in ("", None, unit):
+            continue
+        if name not in (f.get("present") or []):
+            continue
+        rows.append((int(f.get("round", 0) or 0), (f.get("place") or "").strip(), (f.get("summary") or "").strip()))
+    rows = rows[-n:]
+    if not rows:
+        return ""
+    lines = ["R%d%s：%s" % (r, ("·" + p) if p and p != "点击查看" else "", _clip_boundary(s, 150)) for r, p, s in rows]
+    return _clip_boundary("\n".join(lines), limit)
+
+
+_FUEL_RECV = (re.compile(r"(?:送到|塞到|递到|交到|传到|送进|告诉|通知|转告|捅到|落到|摆到|让|叫|使)\s*([一-鿿·]{1,12})"),
+              re.compile(r"([一-鿿·]{1,12})\s*(?:耳边|面前|眼前|收到|得知|听到|看到|看见|发现|撞见|拿到|翻出|接到)"))
+
+
+def _fuel_recipient(fuel, names, default=""):
+    """转折燃料送到谁耳边：先认「送到X/告诉X/让X」这类投递动词，再认「X耳边/X收到/X看见」。
+    旧版取 in_scene 里第一个在燃料文本里出现的名字——"甲手里的账本戳破乙瞒的事，送到丙耳边"
+    会把燃料塞给甲，真正该收到消息的丙一句没听见。"""
+    fuel = (fuel or "").strip()
+    if not fuel:
+        return default
+    names = [n for n in names if n]
+    for pat in _FUEL_RECV:                              # 两趟：投递动词优先于所有格式的位置词
+        for m in pat.finditer(fuel):
+            frag = m.group(1) or ""
+            hit = [n for n in names if n in frag]
+            if hit:
+                return max(hit, key=len)
+    # 没有收件人措辞：最后被提到的人最可能是接收方（"……让乙看见"）
+    last = max(((fuel.rfind(n), n) for n in names if n in fuel), default=(-1, default))
+    return last[1]
+
+
+def _monitor_verdict(v):
+    """监修判词解析：返回 (killed, 死因)。容忍「毙：」「【毙】」「*毙*」等写法，
+    旧版只认逐字「【毙」开头——模型少打一个括号，毙稿就当过审放行。"""
+    s = (v or "").strip()
+    if not s:
+        return False, ""
+    first = s.splitlines()[0].strip().lstrip("*# 　")
+    if re.match(r"^[【\[（(]?\s*毙", first):
+        return True, s[:200]
+    return False, ""
 
 
 def _extras_ledger(D):
@@ -2324,11 +2589,17 @@ def _auto_round(log):
     if inj:
         hint += "\n【上帝注入（本轮生效）】%s" % inj
         meta["gravityInject"] = ""
+        # 即焚必须此刻落盘，不能等轮末：轮末是合并落盘（保留磁盘上的 gravityInject 以接住
+        # 本轮中途的新注入），若此处不清，旧注入会在下一轮再被读一次
+        _mutate_data(lambda d: d.setdefault("meta", {}).__setitem__("gravityInject", ""))
     lore_txt, lore_hits = _lore_ctx(D, U["body"] + "\n" + prev)   # 世界书：常驻+触发命中
     prev_pub = _public_cut(prev)                        # 角色可见的上轮=公共实录（无他人心理/目的——视野律）
-    alive = [c["name"] for c in D.get("cast", [])       # 收押/身故者不再上场（原 _leads 的存活过滤）
-             if not any(k in (c.get("role", "") + c.get("brief", "") + c.get("state", ""))
-                        for k in ("收押", "殁", "已死"))]
+    # 收押/身故者不再上场。判据收窄为"已发生"的措辞：旧版裸匹配「收押」，
+    # 「负责收押的狱卒」这类身份会被整局剔除出场。
+    alive = [c["name"] for c in D.get("cast", [])
+             if not _DEAD_PAT.search(c.get("role", "") + "｜" + c.get("brief", "") + "｜" + c.get("state", ""))]
+    if not alive:
+        return False, "在场名单为空：卡司全部已收押/身故（或身份行被误判）——请检查角色档案的身份/近况字段", False
     # 在场者优先取单元蓝图的明确卡司；不能再用前情提要中出现的名字把全员拉进一场戏。
     in_scene = [n for n in (blueprint.get("cast") or alive) if n in alive] or alive
     # ── 场记搭台：接棒者优先，其次是真正欠戏份的角色 ──
@@ -2375,9 +2646,13 @@ def _auto_round(log):
         driver = baton_prev if baton_prev in in_scene else idle_rank[0]
     if target not in in_scene or target == driver:
         target = next((n for n in idle_rank if n != driver), driver)
+    baton_displaced = ""
     if baton_prev in in_scene and baton_prev not in (driver, target):
-        # 咬合是硬约束不是建议：上轮结果落在谁身上，这一轮就必须有他——场记另选了人则强制他驱动
-        driver, target = baton_prev, (driver if driver != baton_prev else target)
+        # 咬合是硬约束不是建议：上轮结果落在谁身上，这一轮就必须有他——场记另选了人则强制他驱动。
+        # 指向位保留场记选的 target（他是"此刻最该被面对的人"），被挤下驱动位的人改为织入者，
+        # 场记想让上场的人一个不少（旧版把原驱动者硬塞进指向位，场记定的 target 直接掉队）
+        baton_displaced = driver
+        driver, target = baton_prev, (target if target != baton_prev else driver)
         candlog.append("场记越过接棒者→已强制 %s 驱动（咬合律）" % baton_prev)
     streak = int(meta.get("driverStreak", 0) or 0) if meta.get("lastDriver") == driver else 0
     if streak >= 2 and len(in_scene) > 2:              # 已连驱 2 轮又要驱第 3 轮 → 轮转
@@ -2424,11 +2699,21 @@ def _auto_round(log):
         plan["strategy_pressure"] = (
             "不要再用上轮同一招。优先改变地点、对象、公开程度、资源或关系中的一项；"
             "现有事实不足时，记录停滞代价与下次触发条件，不造新事实。")
-    fuel_to = driver
-    for n in in_scene:                                  # 燃料送到场记点名的人耳边；没点名就给驱动者
-        if fuel and n in fuel:
-            fuel_to = n
-            break
+    if baton_displaced and baton_displaced not in (driver, target) and not others and len(in_scene) > 2:
+        others = [baton_displaced]                      # 被接棒者挤下驱动位的人仍是场记点的名：织入
+        candlog.append("咬合律挤下的原驱动者 %s → 织入本轮" % baton_displaced)
+    fuel_to = _fuel_recipient(fuel, in_scene, driver) if fuel else driver   # 燃料送到收件人耳边；没点名就给驱动者
+    if fuel and fuel_to not in (driver, target) and fuel_to in in_scene and len(in_scene) > 2:
+        if not others:
+            others = [fuel_to]                          # 收件人不是主笔就没人接得住燃料——把他织进本轮
+            candlog.append("燃料收件人 %s 不在主笔位 → 织入本轮（否则燃料落空）" % fuel_to)
+        elif fuel_to in others:
+            candlog.append("燃料收件人 %s 已在织入位（覆盖债先排上）" % fuel_to)
+        else:
+            others = [fuel_to]                          # 织入位只有一个：燃料能不能进场比补戏份更要紧
+            candlog.append("燃料收件人 %s 顶替织入位（燃料优先于覆盖债）" % fuel_to)
+    elif fuel and fuel_to in (driver, target):
+        candlog.append("燃料收件人 %s（%s）" % (fuel_to, "驱动者" if fuel_to == driver else "被指向者"))
     leads = [driver, target] + others
     extras = [n for n in in_scene if n not in leads][:3]
     candlog.append("场记：驱动=%s → 指向=%s%s｜冲突轴=%s｜燃料=%s｜焦点=%s｜轮型=%s"
@@ -2439,20 +2724,29 @@ def _auto_round(log):
     AUTO["stepDone"], AUTO["stepTotal"] = 0, max(1, len(leads) + len(extras))
 
     num_led = (D.get("numLedger") or [])[-40:]           # 数目账（零 token）：本轮所有主笔共见
+    scene_ctx = _scene_ctx(U)                            # 角色可见的场：不含单元目标/必须/禁止/预算/细纲
+    last_feed = (D.get("feed") or [{}])[-1] if D.get("feed") else {}
+    prev_place = (last_feed.get("place") or "").strip() if isinstance(last_feed, dict) else ""
+    if prev_place and prev_place != "点击查看" and "本轮物理场地" not in stage_note:
+        stage_note = (stage_note + "\n上一轮所在：" + prev_place).strip()   # 空间连续性：不给场地就至少知道从哪儿接着演
 
     def _one_turn(name, stance, fresh):
         """单主笔（线程安全）：成文→机检粗筛→监修官四刀（毙才重推≤3）→毒编本地修+定点补丁。
         stance=本轮身份提示（驱动者/被找上的人/在场主笔）；fresh=本轮刚发生的对面动作（公共部分）。"""
         lg = []
-        core = _read_cached("角色/%s.md" % name)
+        # 内核卡文件末尾带着建世界时烤进去的【你的秉性】块；这里另按 traits 现算一份 tblock，
+        # 不剥掉就是同一段话发两遍
+        core = _read_cached("角色/%s.md" % name).split("【你的秉性】")[0].rstrip()
         voice = _read_cached("角色/%s·声纹.md" % name)
-        psy = _read_cached("角色/%s·心象.md" % name)
+        psy = _psyche_ctx(_read_cached("角色/%s·心象.md" % name), 2200)
+        memory = _memory_ctx(D, name, U["name"])
         # 提示词分两段：LAW 全局恒定（逐字不变→上游前缀缓存命中），角色三卡随后。
         # 病谱不进提示词（费 token 且下锚），禁令由 dupian.py 机检执法，提示词只留正向法则。
         cast_ent = next((c for c in D.get("cast", []) if c.get("name") == name), {})
         tblock = _traits_block(cast_ent.get("traits") or {})
         sys_p = (ACTOR_LAW + tblock
-                 + "\n【你的内核】%s\n【你的声纹】%s\n【你的记忆（心象）】%s\n" % (core[:2600], voice[:1400], psy[:2200])
+                 + "\n【你的内核】%s\n【你的声纹】%s\n【你的记忆（心象）】%s\n" % (core[:2600], voice[:1400], psy)
+                 + (("【你亲历过的前几轮（只有你在场时看见的事）】\n%s\n" % memory) if memory else "")
                  # 情绪轨迹：心象里的「此刻」每轮被覆盖，只剩一个当前标签——角色因此没有"情绪从哪来的"。
                  # 这里补上近四轮的走势，让情绪可以延续、可以反复，也可以在无变化时保持不变（而不是每轮重置）。
                  + "\n【你这几轮的情绪走势（你自己身上的，不是别人告诉你的）】%s\n"
@@ -2460,7 +2754,7 @@ def _auto_round(log):
                    % _emotion_context(D, name)
                  + TURN_FMT)
         parts = ["【世界】" + world[:2000], "【世界书】" + lore_txt[:1400],
-                 "【此刻的场】" + U["body"][:2400]]
+                 "【此刻的场】" + scene_ctx]
         if stage_note:
             parts.append("【场面】" + stage_note[:200])
         parts.append("【上一轮实录（公共部分）】" + prev_pub[:3600])
@@ -2481,8 +2775,8 @@ def _auto_round(log):
                          + "\n数要具体、要对得上账：引用时照账上的数；你的角色若认为账不对，就当面质疑或改口，"
                            "把对账写成戏——不许悄悄换个数。你不记得的数就说不记得，别编一个圆整的。")
         parts.append("【你此刻的身份】" + stance)
-        parts.append("现在是第%d轮（本单元第%d/%d轮）。以%s的身份行动。"
-                     % (rnd, U["used"] + 1, U["budget"], name))
+        # 只报轮号当时钟，不报"本单元第几/几轮"：预算是导演的表，角色一看见"还剩两轮"就会赶着收场
+        parts.append("现在是第%d轮。以%s的身份行动。" % (rnd, name))
         user_p = "\n".join(parts)
         critique, text, err = "", None, None
         for attempt in range(3):
@@ -2527,12 +2821,17 @@ def _auto_round(log):
             # 监修产出只是一行判词（【过】/【毙…】）＝判定活，关思考：实测 12.8s → 4.6s。
             # 额度回到 900：光砍额度不关思考反而危险——实测 500 额度开思考时 816 字全烧在思考上、
             # 正文 0 字，白触发一次自愈重试，比不砍更慢。
+            # 监修的视野刀要有依据：他知道什么（心象）、场上刚公开过什么。旧版只给内核卡与正文，
+            # "是否用了他不该知道的信息"无从判起，视野刀等于空刀。
+            seen = (("【刚刚当着他的面】\n%s\n" % fresh[:900]) if fresh else "") + \
+                   (("【上一轮公开实录（节选）】\n%s\n" % prev_pub[:1200]) if prev_pub else "")
             v, _e = _llm([{"role": "system", "content": REVIEW_SYS},
-                          {"role": "user", "content": "角色：%s\n内核卡摘要：%s\n%s回合：\n%s"
-                           % (name, core[:1800], tblock, text)}],
+                          {"role": "user", "content": "角色：%s\n内核卡摘要：%s\n%s【他此刻知道的（心象节选）】\n%s\n%s回合：\n%s"
+                           % (name, core[:1800], tblock, psy[:1400], seen, text)}],
                          cfg, temperature=0.2, max_tokens=1600, think=False)
-            if v and v.strip().startswith("【毙"):
-                critique = v.strip()[:200]
+            killed, why = _monitor_verdict(v)
+            if killed:
+                critique = why
                 lg.append("%s：审%d毙（%s）→重推" % (name, attempt + 1, critique[:40]))
                 continue
             critique = ""
@@ -2600,10 +2899,10 @@ def _auto_round(log):
         just_now = "\n".join("%s：%s" % (n, _public_cut(t)) for n, t in turns)[-1200:]
 
         def _one_react(name):
-            psy = _strip_fm(_read("角色/%s·心象.md" % name))
+            psy = _psyche_ctx(_read_cached("角色/%s·心象.md" % name), 1400)
             r, _e = _llm([{"role": "system", "content": REACT_SYS},
                           {"role": "user", "content": "你是%s。\n【你的心象】%s\n【本场】%s\n【刚发生的】\n%s\n写你的反应。"
-                           % (name, psy[:1400], U["body"][:1200], just_now)}],
+                           % (name, psy, scene_ctx[:1200], just_now)}],
                          cfg, max_tokens=1200, temperature=0.85, think=False)
             rr = _dp_local((r or "").strip())
             if len(rr) > 120:                            # 超长反应裁到句界，不许拦腰斩出半句引文
@@ -2648,6 +2947,7 @@ def _auto_round(log):
         if stext and stext.strip():
             R["scene"] = stext.strip()[:200]
             log("R%d 裁判 JSON 缺席 → 已降级取纪要（三查本轮记为未判）" % rnd)
+    referee_absent = not (R.get("scene") or "").strip() and not R.get("beats")
     scene = _dp_local((R.get("scene") or "").strip())
     if not scene:                                           # 裁判缺席也不留白：抽首回合行为当速记
         for _n, _t in turns:
@@ -2662,7 +2962,11 @@ def _auto_round(log):
     chron = _dp_local((R.get("chronicle") or scene[:60]).strip())
     states = R.get("states") or {}
     gravity = R.get("gravity") or "顺"
-    prog = R.get("goal_progress") or "推进"
+    # 裁判没给 goal_progress 时不许默认成「推进」：那会让主线账凭空 +18、停滞计数清零、
+    # 页面显示"目标推进"——全是没有证据的进度。缺席就如实记「未判」（不算推进也不算停滞）。
+    prog = (R.get("goal_progress") or "").strip() or "未判"
+    if prog not in ("未动", "推进", "临门", "达成"):
+        prog = "未判" if referee_absent or prog == "未判" else "未动"
     checks = R.get("checks") or {}
     touched = [t for t in (R.get("touched") or []) if t][:5]
     # 四拍与接棒：结构层判定（裁判缺席时从场记搭台回退，链不许断）
@@ -2776,6 +3080,20 @@ def _auto_round(log):
     for sp in D.get("spine", []):
         if touched and sp.get("label") in touched and not sp.get("touchedRound"):
             sp["touchedRound"] = rnd
+    # 图谱关系边随剧情生长：驱动→指向是本轮真实发生的交手；裁判判定的旧账是不可逆的关系变化
+    try:
+        _ui = _unit_index(D, U["name"])
+        if target != driver:
+            _graph_relate(D, driver, target, _ui)
+        for sc in (R.get("scars") or [])[:2]:
+            if isinstance(sc, dict) and sc.get("a") and sc.get("b"):
+                _graph_relate(D, sc["a"], sc["b"], _ui, weight=2)
+    except Exception as e:
+        log("R%d 图谱关系更新失败：%s" % (rnd, e))
+    # 临门滞留：连报"临门"却不落地 → 记数，3 轮后下轮强制按收束轮打（不许在门口徘徊耗预算）。
+    # 必须在 _save_data 之前写：旧版写在落盘之后，计数只活在内存里，下一轮重读 data.json 又是 0，
+    # 「临门三轮强制收束」从未真正生效过。
+    meta["nearDone"] = (int(meta.get("nearDone", 0) or 0) + 1) if prog == "临门" else 0
     # 真人度（零 token）：各主笔回合的 dupian.human_score 均值——给作者逐轮正反馈，非执法
     human = None
     if dupian and hasattr(dupian, "human_score") and turns:
@@ -2803,9 +3121,7 @@ def _auto_round(log):
         gl = D.setdefault("gaps", [])
         if g not in gl:
             gl.append(g)
-    _save_data(D)
-    # 临门滞留：连报"临门"却不落地 → 记数，3 轮后下轮强制按收束轮打（不许在门口徘徊耗预算）
-    meta["nearDone"] = (int(meta.get("nearDone", 0) or 0) + 1) if prog == "临门" else 0
+    _save_data_merge(D)                                 # 轮末落盘：合并这几分钟里旁路写进磁盘的访谈/导出/新注入
     # 收束判定
     closed = prog == "达成" or (U["used"] + 1) >= U["budget"]
     # 停滞收束：剧情实质结束但裁判不报"达成"时，连续 3 轮目标未动 → 判停滞自动收束，不吃满预算
@@ -2838,6 +3154,17 @@ def _advance_unit(log):
     meta["baton"] = ""
     meta["nextPlan"] = None
     meta["nearDone"] = 0
+    # 上一单元的节奏债不跨单元继承：平轮债/连驱计数/上轮四拍/策略循环债都是"这场戏"的账
+    for k in ("flatDebt", "driverStreak", "loopDebt"):
+        meta[k] = 0
+    meta["lastDriver"] = ""
+    meta["lastBeats"] = {}
+    AUTO["stall"] = 0
+    budget = int(nxt.get("budget") or 0)
+    nxt["status"] = "当前单元（0/%d）" % budget if budget else "当前单元"
+    g = D.get("graph")
+    if isinstance(g, dict):
+        g["unit"] = nxt["name"]
     _save_data(D)
     log("自动进入下一单元「%s」——接棒链重置，剧情继续。" % nxt["name"])
     return True
@@ -3016,7 +3343,8 @@ def _auto_close(D, U, rnd, prog, log):
     for u in D.get("units", []):
         if u.get("name") == U["name"]:
             u["status"] = "已收束（%d/%d）" % (U["used"] + 1, U["budget"])
-            u["result"] = "达成" if prog == "达成" else "预算耗尽·目标改写"
+            u["result"] = ("达成" if prog == "达成" else
+                           "停滞收束·目标改写" if str(prog).startswith("停滞") else "预算耗尽·目标改写")
             cal = D.setdefault("meta", {}).setdefault("calibration", [])
             cal.append({"unit": U["name"], "est": u.get("est", ""), "actual": U["used"] + 1,
                         "result": u["result"]})                       # 预估校准账：攒真数据修尺
@@ -3068,11 +3396,8 @@ def _round_times():
 
 def _push_round_time(secs):
     AUTO["roundTimes"] = (AUTO["roundTimes"] + [round(secs, 1)])[-10:]
-    try:                                            # 落盘：跨重启保留计时样本
-        D = _load_data()
-        if D:
-            D.setdefault("meta", {})["roundSecs"] = AUTO["roundTimes"]
-            _save_data(D)
+    try:                                            # 落盘：跨重启保留计时样本（持锁重读，只改这一个键）
+        _mutate_data(lambda d: d.setdefault("meta", {}).__setitem__("roundSecs", AUTO["roundTimes"]))
     except Exception:
         pass
 
@@ -4086,9 +4411,6 @@ def _auto_init(raw, title_hint, requirement, log, confirm=False):
         for nm in (u.get("cast") or [c["name"] for c in cast]):
             if any(n["id"] == nm for n in nodes):
                 edges.append({"source": nm, "target": u.get("name", ""), "kind": "出场", "unitIndex": i})
-    for a in range(len(cast)):
-        for b in range(a + 1, min(len(cast), a + 4)):
-            edges.append({"source": cast[a]["name"], "target": cast[b]["name"], "kind": "关系", "unitIndex": 0})
     D = {"meta": {"title": title, "round": 0, "unitName": units[0].get("name", ""),
                   "unitRound": "0/%d" % nb, "gravity": "顺", "engine": "NEST-DRAMA", "built": True,
                   "vaultPath": ROOT_DIR, "config": {"plannedRounds": nb}},
@@ -4113,6 +4435,8 @@ def _auto_init(raw, title_hint, requirement, log, confirm=False):
                     "goal": u.get("goal", ""), "est": "%d-%d" % (u.get("estLo", 8), u.get("estHi", 12)),
                     "estWhy": u.get("estWhy", ""), "colorIndex": i} for i, u in enumerate(units)],
          "interviews": [], "reports": [], "exports": []}
+    # 关系边：按角色卡互相点名连线（有原文依据），不再按名册顺序连假链
+    log("图谱关系：%d 对角色在三卡里互相点名" % _init_relations(D, cast))
     _save_data(D)
     _pending_clear()
     hist = _archives_store()                             # 新局登记为当前局（局史持久）
@@ -4184,9 +4508,10 @@ def _gravity_inject(text):
     text = (text or "").strip()
     if not text:
         return False, "空注入"
-    D = _load_data() or {}
-    D.setdefault("meta", {})["gravityInject"] = text[:300]
-    _save_data(D)
+    # 持锁重读再写：推演线程正拿着几分钟前的 D，这里若用旧副本整份覆盖会把它刚落的一轮抹掉；
+    # 反过来推演线程轮末走 _save_data_merge，会把这里写的注入接住
+    if _mutate_data(lambda d: d.setdefault("meta", {}).__setitem__("gravityInject", text[:300])) is None:
+        return False, "尚未建世界"
     return True, "已注入，下一轮生效"
 
 
@@ -4214,7 +4539,7 @@ def _interview(who, q, mode="戏内", log=None, timeout=None):
     else:
         core = _strip_fm(_read("角色/%s.md" % who))
         voice = _strip_fm(_read("角色/%s·声纹.md" % who))
-        psy = _strip_fm(_read("角色/%s·心象.md" % who))
+        psy = _psyche_ctx(_strip_fm(_read("角色/%s·心象.md" % who)), 2400)   # 旧账/此刻必进，不被截尾
         if mode == "吐真":
             sys_p = ("你是「%s」的扮演者（吐真模式）：卸下角色伪装如实回答——藏着的事、对他人的真实看法、"
                      "轮次里没说出口的话。引用戏外信息时标「（戏外）」。\n"
@@ -4250,10 +4575,12 @@ def _interview(who, q, mode="戏内", log=None, timeout=None):
         import re as _re
         a = _re.sub(r"[（(][^）)\n]{2,40}[）)]", "", a)
         a = _re.sub(r"\n{3,}", "\n\n", a).strip()
-    D.setdefault("interviews", []).insert(0, {"who": who, "q": q, "mode": mode, "a": a,
-                                              "at": time.strftime("%Y-%m-%d %H:%M:%S")})
-    D["interviews"] = D["interviews"][:50]
-    _save_data(D)
+    rec = {"who": who, "q": q, "mode": mode, "a": a, "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+
+    def _put(d):                                     # 访谈跑了 30-60 秒，期间可能落了一整轮：只插答案，不覆盖别的
+        d.setdefault("interviews", []).insert(0, rec)
+        d["interviews"] = d["interviews"][:50]
+    _mutate_data(_put)
     return a, None
 
 
@@ -4560,6 +4887,8 @@ def _queue_worker():
                 _queue_set(it["id"], "失败", msg)
             finally:
                 AUTO["running"] = False
+                AUTO["pausing"] = False                  # 门面 start→队列 beat 这条线结束后也要收掉"正在断停"
+                AUTO["runLeft"] = 0
             log("指令 %s %s：%s" % (it.get("id"), "完成" if ok else "失败", (msg or "")[:120]))
         except Exception as e:
             AUTO["err"] = "队列消费异常：%s" % e
@@ -4581,7 +4910,12 @@ def _auto_beat(n):
             if AUTO["stop"]:
                 log("已暂停（round 计数保留，可随时续跑）")
                 break
-            ok, msg, closed = _auto_round(log)
+            try:
+                ok, msg, closed = _auto_round(log)
+            except Exception as e:                       # 轮内未预料的异常：按一次失败计，不让线程静默消失
+                import traceback
+                ok, msg, closed = False, "轮内异常：%s" % traceback.format_exc().strip().splitlines()[-1][:160], False
+                AUTO["err"] = msg
             if ok is None:                                   # 轮内阶段间暂停信号
                 log(msg + "（round 计数保留，可随时续跑）")
                 break
@@ -4711,7 +5045,9 @@ def _continue_story(outline, new_cast, rounds):
     goal = next((ln.strip() for ln in outline.splitlines() if len(ln.strip()) > 6), outline[:120]) or "（续演单元）"
     D.setdefault("units", []).append({"name": first, "budget": budget, "used": 0,
                                       "status": "待推演（0/%d）" % budget, "goal": goal,
-                                      "est": est, "colorIndex": n - 1})
+                                      "est": est, "colorIndex": n - 1,
+                                      # 细纲点到名的既有角色即在场卡司（≥2 人才算点名；否则全员）
+                                      "cast": named if len(named) >= 2 else []})
     fc = D.setdefault("forecast", {})
     fc.setdefault("perUnit", {})[first] = est
     fc["remaining"] = est
@@ -4725,12 +5061,12 @@ def _continue_story(outline, new_cast, rounds):
     nodes, edges = g.setdefault("nodes", []), g.setdefault("edges", [])
     if not any(x.get("id") == first for x in nodes):
         nodes.append({"id": first, "group": "unit", "file": "剧本/" + fname})
-    for c in D.get("cast", []):
-        nm = c.get("name")
+    present = named if len(named) >= 2 else [c.get("name") for c in D.get("cast", [])]
+    for nm in present:
         if nm and not any(e.get("source") == nm and e.get("target") == first for e in edges):
             edges.append({"source": nm, "target": first, "kind": "出场", "unitIndex": n - 1})
     g["unit"] = first
-    json.dump(D, open(os.path.join(UI_DIR, "data.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    _save_data(D)                                    # 原子落盘（旧版裸 json.dump：读方可能撞见半截文件）
     return first, est
 
 
@@ -5261,6 +5597,11 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json(400, {"error": "mode 只能是 low/medium/high"})
             return self._json(200, {"ok": True, "mode": AUTO["gmode"],
                                     "note": "引力档已切到 %s——下一轮生效，本轮不受影响" % AUTO["gmode"]})
+        if t == "gravity":
+            # 上帝注入直通：旧版入队，而队列在推演中只放行暂停——注入要等整段自动驾驶跑完才被消费，
+            # 与"下一轮生效"的承诺不符。现在持锁直写，轮末合并落盘接得住
+            okg, noteg = _gravity_inject(p.get("text") or p.get("q") or "")
+            return self._json(200 if okg else 400, {"ok": okg, "note" if okg else "error": noteg})
         if t == "interview" and _llm_cfg() and not AUTO["running"]:
             # 空闲时采访直跑（后台线程），不再等队列 5 秒轮询——用户点了发问 30-60 秒毫无动静，
             # 体验上就是"没反应"。推演中仍走队列（轮末消费，避免与推演线程并发写 data.json）。
@@ -5302,8 +5643,11 @@ class Handler(SimpleHTTPRequestHandler):
                 "log", (AUTO["log"] + [s])[-50:]))
             if not res:
                 return self._json(400, {"error": "可抽样的过审回合不足（至少要 2 段）"})
-            D2.setdefault("outcome", {})["turing"] = res
-            _save_data(D2)
+            def _put_turing(d):
+                if not isinstance(d.get("outcome"), dict):
+                    d["outcome"] = {}
+                d["outcome"]["turing"] = res
+            _mutate_data(_put_turing)
             return self._json(200, {"ok": True, "turing": res})
         if t == "export":
             name, err = _compile_report()
@@ -5369,6 +5713,10 @@ class Handler(SimpleHTTPRequestHandler):
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
+    allow_reuse_address = True
+    # 浏览器首屏并发拉 bundle/css/data/SSE 六七条连接，默认 backlog 5 会让个别连接被拒后重试——
+    # 表现为首屏偶发"资源加载失败/白屏一下"
+    request_queue_size = 64
 
     def handle_error(self, request, client_address):
         """浏览器断开连接（SSE 关页/预连接取消）是常态噪音，静默之。"""

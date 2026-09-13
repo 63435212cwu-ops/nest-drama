@@ -64,6 +64,7 @@ python3 ui/serve.py
 | `G` | 画质面板 | `S` | 导出 PNG |
 | `/` | 卡司检索 | `T` | 切换主题 |
 | `H` | 历史局 | `Esc` | 逐层退出 |
+| `V` | 录制 30 秒演示片（WebM） | `?` | 快捷键表 |
 
 ## API
 
@@ -94,7 +95,8 @@ docs/                        截图
 ## 测试
 
 ```bash
-python3 ui/test_serve.py
+python3 ui/tests/run_all.py      # 全套：集成套件 + 9 个分模块测试（mock LLM，零 API 成本）
+python3 ui/test_serve.py        # 只跑集成套件
 ```
 
 ## 参与与安全

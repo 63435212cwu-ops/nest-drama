@@ -64,6 +64,7 @@ Keep one work per world. If a run is interrupted, resubmit to resume; unchanged 
 | `G` | Quality panel | `S` | Export PNG |
 | `/` | Cast search | `T` | Cycle theme |
 | `H` | History | `Esc` | Step back out |
+| `V` | Record a 30-second demo clip (WebM) | `?` | Shortcut sheet |
 
 ## API
 
@@ -94,7 +95,8 @@ docs/                        Screenshots
 ## Tests
 
 ```bash
-python3 ui/test_serve.py
+python3 ui/tests/run_all.py     # full suite: integration + 9 module tests (mock LLM, no API cost)
+python3 ui/test_serve.py       # integration suite only
 ```
 
 ## Contributing & security

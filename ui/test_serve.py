@@ -382,15 +382,17 @@ _orph = [i for i in _qq["queue"] if i.get("status") == "处理中"]
 check("孤儿 init 在队列里待回收", len(_orph) == 1)
 
 print("== ⑪ 终局机制：提前收束/换单元/全局终局守卫 ==")
-_D = {"meta": {"unitName": "第一幕", "title": "终局测试局"},          # ⑩ 已清库：现造最小局
+_D = {"meta": {"unitName": "第一幕", "title": "终局测试局", "flatDebt": 2, "driverStreak": 3, "lastDriver": "青梧"},
       "units": [{"name": "第一幕", "status": "已收束（3/8）", "goal": "g1"},
-                {"name": "第二幕", "status": "待启", "goal": "g2"}]}
+                {"name": "第二幕", "status": "待启", "goal": "g2", "budget": 6}]}   # ⑩ 已清库：现造最小局
 json.dump(_D, open(m.DATA_PATH, "w", encoding="utf-8"), ensure_ascii=False)
 check("未全收束时 _all_closed=False", not m._all_closed())
 check("收束后自动进下一单元", m._advance_unit(lambda x: None))
 _D2 = json.load(open(m.DATA_PATH, encoding="utf-8"))
 check("单元已切换且链状态重置", _D2["meta"]["unitName"] == "第二幕"
       and _D2["meta"].get("baton") == "" and not _D2["meta"].get("nextPlan"), _D2["meta"].get("unitName"))
+check("换单元清节奏债并标当前单元", _D2["meta"].get("flatDebt") == 0 and _D2["meta"].get("driverStreak") == 0
+      and _D2["units"][1]["status"].startswith("当前单元"), (_D2["meta"].get("flatDebt"), _D2["units"][1]["status"]))
 _D2["units"][1]["status"] = "已收束（5/8）"
 json.dump(_D2, open(m.DATA_PATH, "w", encoding="utf-8"), ensure_ascii=False)
 check("全部收束 → _all_closed=True", m._all_closed())
@@ -813,6 +815,99 @@ m._write_cast_files = _real_wcf
 m._build_fail_clear()
 m.ROOT_DIR, m.UI_DIR, m.DATA_PATH, m.PENDING_PATH = _oldROOT, _oldUI, _oldDATA, _oldPEND
 m._llm_cfg = REAL_LLM_CFG
+
+print("== ⑳ 复核修正（2026-09-14）：视野律公共裁切 / 剧情账枚举 / 图谱关系边 / 出场过滤 / 数目账噪声 ==")
+_rec = ("---\nround: 3\n---\n\n# 第3轮 · 单元「甲」\n\n## 青梧 回合\n\n【目的】指向→白榆；逼出他昨夜去向\n"
+        "【行为】把灯往他脸上推了推。\n【对话】「你昨夜去哪了？」\n【心理】我读到他在躲。\n【走神】早饭还没吃。\n\n"
+        "## 白榆 反应\n\n【反应】退了半步。\n\n## 【结构·四拍】\n\n- 目的：青梧要逼出白榆去向\n- 接棒：白榆——被问住了\n\n"
+        "## 审核审计（快档·不入正文）\n\n- 一次过审\n\n## 【纪要】\n\n青梧举灯逼问，白榆退了半步没答。\n\n"
+        "## 引力检查\n\n- 阶段：收束轮｜引力：顺｜目标：临门（快到了）\n\n## 三查与脊椎触达\n\n- 脊椎触达：铁节点A\n")
+_pc = m._public_cut(_rec)
+check("公共裁切保留行为/对话/反应/纪要", all(x in _pc for x in ("把灯往他脸上推了推", "退了半步", "青梧举灯逼问")))
+check("公共裁切不漏目的/心理/走神", not any(x in _pc for x in ("逼出他昨夜去向", "我读到他在躲", "早饭还没吃")))
+check("公共裁切不漏导演层（四拍/接棒/引力/脊椎）", not any(x in _pc for x in ("接棒", "结构", "临门", "脊椎", "审核")), _pc[-80:])
+check("剧情账枚举含「搁置」→deferred", m._MOVEMENT.get("搁置") == "deferred")
+_Dg = {"units": [{"name": "甲", "colorIndex": 0}, {"name": "乙", "colorIndex": 1}], "graph": {"edges": []}}
+m._graph_relate(_Dg, "a", "b", m._unit_index(_Dg, "乙"))
+m._graph_relate(_Dg, "b", "a", 0, weight=2)
+_eg = _Dg["graph"]["edges"]
+check("关系边无向去重且累加权重", len(_eg) == 1 and _eg[0]["weight"] == 3 and _eg[0]["kind"] == "关系", _eg)
+check("关系边不连自己/空名", m._graph_relate(_Dg, "a", "a") is None and m._graph_relate(_Dg, "", "b") is None)
+check("出场过滤：身份含「收押」职能词不误杀", not m._DEAD_PAT.search("负责收押的狱卒"))
+check("出场过滤：已被收押/死者被剔除", m._DEAD_PAT.search("已被收押的账房") and m._DEAD_PAT.search("死者，绸庄少东"))
+_bp = m._unit_blueprint({"cast": [{"name": "甲"}, {"name": "乙"}, {"name": "丙"}], "units": [{"name": "续"}]},
+                        {"name": "续", "goal": "x", "body": "# 单元02 · 续\n\n## 卡司（本单元在场者）\n\n甲、乙\n\n"
+                                                              "## 前情提要\n\n丙说了很多。\n\n## 细纲\n\n甲找乙。\n"})
+check("续演单元裸名卡司行被识别（丙不进两人戏）", _bp["cast"] == ["甲", "乙"], _bp["cast"])
+_bp2 = m._unit_blueprint({"cast": [{"name": "甲"}], "units": [{"name": "u"}]},
+                         {"name": "u", "goal": "x", "body": "## 舞台\n深冬；雪夜；压抑的宅院\n地点：账房\n"})
+check("舞台氛围散文不再被切成场地", _bp2["scenes"] == ["账房"], _bp2["scenes"])
+if _dp2:
+    _nf2 = _dp2.num_facts("两人对视，第三天清晨，一两天后，甲士八百人。", "x")
+    check("数目账忽略叙事人称/序数/约数", [(f["qty"], f["unit"]) for f in _nf2] == [(800, "人")], _nf2)
+
+print("== ㉑ 推演信封（角色不知剧情终点 / 记忆不截尾 / 燃料送对人 / 判词容错）==")
+_b1 = ("# 单元01 · 立案\n\n## 卡司\n在场：甲、乙\n暗线：丙\n\n## 舞台\n深冬县城，雪夜。\n\n## 开场态\n尸体刚被抬进义庄。\n\n"
+       "## 单元目标\n县令被迫立案。\n\n## 单元约束\n- 必须：账本被翻出\n- 禁止：真凶露面\n\n## 轮次预算\n最多 12 轮（预估 10-14：x）\n")
+_s1 = m._scene_ctx({"body": _b1})
+check("角色信封不含单元目标/必须/禁止/预算/暗线", not any(x in _s1 for x in ("县令被迫立案", "账本被翻出", "真凶露面", "最多", "暗线")), _s1)
+check("角色信封保留舞台/开场态/在场卡司", all(x in _s1 for x in ("雪夜", "义庄", "在场：甲、乙")))
+_b2 = ("# 单元02 · 续\n\n## 卡司（本单元在场者）\n\n甲、乙\n\n## 前情提要（当前故事结尾——新剧情必须从此无缝衔接）\n\n上回书说到……\n\n"
+       "## 细纲\n\n甲将在账房揭穿乙。\n\n## 新增角色（待引擎建三卡）\n\n丁\n")
+_s2 = m._scene_ctx({"body": _b2})
+check("续演单元：细纲不进角色信封，前情提要保留", "揭穿" not in _s2 and "上回书" in _s2 and "丁" not in _s2, _s2)
+_ps = ("# 甲 · 心象\n\n" + "他知道的世界。" * 200 + "\n\n## 此刻\n\n此刻很怕。\n\n## 打算\n\n眼下：去账房。\n\n"
+       "## 旧账（回不去的地方，只增不删）\n" + "\n".join("- 第%d轮·与[[乙]]：撕破脸%d" % (i, i) for i in range(1, 15)) + "\n")
+_pc2 = m._psyche_ctx(_ps, 900)
+check("心象裁切：旧账/此刻/打算必进且不超上限", all(x in _pc2 for x in ("撕破脸14", "此刻很怕", "去账房")) and len(_pc2) <= 950, len(_pc2))
+check("心象裁切：旧账只带最近 8 条", "撕破脸6\n" not in _pc2 and "撕破脸7" in _pc2)
+check("燃料收件人：投递动词优先于「X手里」", m._fuel_recipient("甲手里的账本恰好戳破乙瞒着的事，送到丙耳边", ["甲", "乙", "丙"]) == "丙")
+check("燃料收件人：塞到X手里", m._fuel_recipient("守夜名单此刻被塞到白榆手里", ["青梧", "白榆"]) == "白榆")
+check("燃料收件人：无措辞取最后被提到者", m._fuel_recipient("有人让乙看见了那封信", ["甲", "乙"]) == "乙")
+check("判词容错：毙/【毙】/**【毙】**均判毙，过不误杀",
+      m._monitor_verdict("毙：视野刀")[0] and m._monitor_verdict("**【毙】** 人格刀")[0]
+      and not m._monitor_verdict("【过】")[0] and not m._monitor_verdict("过。毙不了。")[0])
+_Dm = {"feed": [{"round": 1, "unit": "u", "present": ["甲", "乙"], "place": "账房", "summary": "甲翻账。"},
+                {"round": 2, "unit": "u", "present": ["乙"], "place": "后院", "summary": "乙埋信。"}]}
+_mem = m._memory_ctx(_Dm, "甲", "u")
+check("亲历记忆只含在场轮次（视野律）", "甲翻账" in _mem and "乙埋信" not in _mem, _mem)
+print("== ㉒ 并发咬合：data.json 写路径不互相抹、不留半截、不闪失 ==")
+import threading as _th
+_oldD = m._load_data() or {"meta": {"round": 7}}
+_oldD.setdefault("meta", {})["round"] = 7
+m._save_data(_oldD)
+check("落盘后 .bak 与正文并存（复制而非改名）", os.path.exists(m.DATA_PATH) and os.path.exists(m.DATA_PATH + ".bak"))
+_errs = []
+
+
+def _writer(k):
+    try:
+        for _i in range(25):
+            m._mutate_data(lambda d: d.setdefault("cc", {}).__setitem__("w%d" % k, _i))
+    except Exception as e:
+        _errs.append(repr(e))
+
+
+_ths = [_th.Thread(target=_writer, args=(k,)) for k in range(6)]
+[t.start() for t in _ths]
+[t.join() for t in _ths]
+_Dc = m._load_data()
+check("6 线程×25 次并发写无异常、文件可解析", not _errs and _Dc is not None, _errs[:2])
+check("并发写无一丢失（每线程终值都在）", _Dc and all(_Dc.get("cc", {}).get("w%d" % k) == 24 for k in range(6)), _Dc and _Dc.get("cc"))
+check("无残留临时文件", not [f for f in os.listdir(m.UI_DIR) if f.endswith(".tmp")])
+_long = m._load_data()                                  # 模拟推演线程：拿着旧 D 跑几分钟
+_long["meta"]["round"] = 8
+m._mutate_data(lambda d: d.setdefault("interviews", []).insert(0, {"who": "青梧", "a": "旁路答案"}))
+m._gravity_inject("旁路注入")
+m._save_data_merge(_long)
+_Dm2 = m._load_data()
+check("轮末合并落盘：轮号以推演为准", _Dm2["meta"]["round"] == 8)
+check("轮末合并落盘：中途访谈答案与注入不被抹掉",
+      any(x.get("a") == "旁路答案" for x in _Dm2.get("interviews", [])) and _Dm2["meta"].get("gravityInject") == "旁路注入")
+m._mutate_data(lambda d: d["meta"].__setitem__("gravityInject", ""))
+_p_act = [p for w, p in ACTOR_CALLS.get("prompts", []) if w == "青梧"]
+check("角色回合不报单元预算（不知还剩几轮）", _p_act and all("本单元第" not in p for p in _p_act))
+check("角色回合不含单元目标", _p_act and all("目标达成态" not in p for p in _p_act))
 
 print("LLM 假调用总数:", CALLS["n"])
 print("\n%s  %d 项失败" % ("测试全部通过 ✔" if not fails else "存在失败 ✘", len(fails)))

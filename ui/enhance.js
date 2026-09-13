@@ -98,10 +98,16 @@
 
   /* ---------------- 卡司检索 ---------------- */
   function decorateCast() {
-    var heads = document.querySelectorAll(".kicker, .label, .mut, b, div, span");
+    // 每次 DOM 变动都会进来（SSE 每 2 秒刷一次页面）。旧版对页面上所有 div/span 取 textContent 再正则，
+    // textContent 会拼接整棵子树——大页面上一次变动就是几万次字符串拼接，推演页明显掉帧。
+    // 现在只看"叶子级"元素：没有孙节点、首个子节点是文本，才取文本比对。
+    var heads = document.querySelectorAll(".kicker, .label, .mut, b, span, div");
     for (var i = 0; i < heads.length; i++) {
       var h = heads[i];
-      if (h.children.length > 1 || !/^卡司\s*[·・]\s*\d+\s*人$/.test(txt(h))) continue;
+      if (h.children.length > 1) continue;
+      if (h.children.length === 1 && h.children[0].children.length) continue;
+      var fc = h.firstChild; if (!fc || (fc.nodeType !== 3 && h.children.length !== 1)) continue;
+      if (!/^卡司\s*[·・]\s*\d+\s*人$/.test(txt(h))) continue;
       if (h.dataset.ndCast) return;
       var list = h.nextElementSibling;
       if (!list || list.children.length < 4) return;
